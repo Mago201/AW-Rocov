@@ -183,6 +183,35 @@ public:
       return PANEL_ACTION_NONE;
      }
 
+   //--- Опрос состояний кнопок. Возвращает действие, если какая-то
+   //--- кнопка нажата (OBJPROP_STATE = true). Сразу сбрасывает state.
+   //--- Нужен в качестве подстраховки, потому что в Strategy Tester
+   //--- Visual Mode событие CHARTEVENT_OBJECT_CLICK иногда не доходит,
+   //--- но изменение OBJPROP_STATE при клике происходит всегда.
+   ENUM_PANEL_ACTION Poll()
+     {
+      if(!m_built) return PANEL_ACTION_NONE;
+
+      ENUM_PANEL_ACTION found = PANEL_ACTION_NONE;
+      string            hit;
+
+      if((bool)ObjectGetInteger(0, m_n_buy, OBJPROP_STATE))
+        { found = PANEL_ACTION_BUY;   hit = m_n_buy; }
+      else if((bool)ObjectGetInteger(0, m_n_sell, OBJPROP_STATE))
+        { found = PANEL_ACTION_SELL;  hit = m_n_sell; }
+      else if((bool)ObjectGetInteger(0, m_n_close, OBJPROP_STATE))
+        { found = PANEL_ACTION_CLOSE; hit = m_n_close; }
+
+      if(found != PANEL_ACTION_NONE)
+        {
+         ObjectSetInteger(0, hit, OBJPROP_STATE, false);
+         ChartRedraw(0);
+         if(m_log != NULL)
+            m_log.Info("POLL поймал клик: " + ActionName(found));
+        }
+      return found;
+     }
+
    string            ActionName(const ENUM_PANEL_ACTION a) const
      {
       switch(a)

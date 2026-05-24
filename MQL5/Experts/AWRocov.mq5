@@ -4,7 +4,7 @@
 //+------------------------------------------------------------------+
 #property copyright "AW-Rocov"
 #property link      "https://github.com/Mago201/AW-Rocov"
-#property version   "0.13"
+#property version   "0.14"
 #property strict
 #property description "Чистый recovery EA: замок + усреднение + частичный TP."
 #property description "Управляет существующей корзиной + панель ручных кнопок BUY/SELL/CLOSE."
@@ -133,7 +133,7 @@ int OnInit()
       && InpShowManualPanel && !in_optimization)
       g_log.Warn("тестер БЕЗ Visual Mode — клики кнопок не доходят");
 
-   g_log.Info(StringFormat("AWRocov v0.13 запущен на %s magic=%I64u panel=%s "
+   g_log.Info(StringFormat("AWRocov v0.14 запущен на %s magic=%I64u panel=%s "
                            "term_trade=%s mql_trade=%s acc_trade=%s",
                            _Symbol, InpMagic,
                            show_panel ? "да" : "нет",
@@ -223,6 +223,17 @@ void ProcessPendingAction()
 //+------------------------------------------------------------------+
 void OnTick()
   {
+   // Опрос кнопок — подстраховка на случай, если CHARTEVENT_OBJECT_CLICK
+   // не доставляется (известный глюк тестера в Visual Mode).
+   ENUM_PANEL_ACTION polled = g_panel.Poll();
+   if(polled != PANEL_ACTION_NONE)
+     {
+      g_pending_action  = polled;
+      g_click_counter++;
+      g_last_click_name = "POLL:" + g_panel.ActionName(polled);
+      g_last_click_time = TimeCurrent();
+     }
+
    ProcessPendingAction();
    g_engine.Tick();
    UpdateStatusComment();
@@ -233,7 +244,7 @@ void UpdateStatusComment()
   {
    const SBasketStats st = g_basket.Stats();
    string s = StringFormat(
-      "AWRocov v0.13 | %s | magic=%I64u\n"
+      "AWRocov v0.14 | %s | magic=%I64u\n"
       "состояние: %-18s   направление: %+d   замок: %s\n"
       "корзина: BUY %d (%.2f лот @ %.5f) | SELL %d (%.2f лот @ %.5f)\n"
       "плавающий PnL: %.2f   усреднений: %d/%d\n"
