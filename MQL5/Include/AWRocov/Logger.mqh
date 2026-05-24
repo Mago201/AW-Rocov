@@ -1,16 +1,16 @@
 //+------------------------------------------------------------------+
 //|  Logger.mqh                                                       |
-//|  Lightweight prefixed logger for AW-Rocov                         |
+//|  Лёгкий логгер с префиксом для AW-Rocov                           |
 //+------------------------------------------------------------------+
 #ifndef __AWROCOV_LOGGER_MQH__
 #define __AWROCOV_LOGGER_MQH__
 
 enum ENUM_LOG_LEVEL
   {
-   LOG_DEBUG = 0,
-   LOG_INFO  = 1,
-   LOG_WARN  = 2,
-   LOG_ERROR = 3
+   LOG_DEBUG = 0,   // отладка
+   LOG_INFO  = 1,   // информация
+   LOG_WARN  = 2,   // предупреждение
+   LOG_ERROR = 3    // ошибка
   };
 
 class CLogger
@@ -23,10 +23,10 @@ private:
      {
       switch(lvl)
         {
-         case LOG_DEBUG: return "DBG";
-         case LOG_INFO:  return "INF";
-         case LOG_WARN:  return "WRN";
-         case LOG_ERROR: return "ERR";
+         case LOG_DEBUG: return "ОТЛ";
+         case LOG_INFO:  return "ИНФ";
+         case LOG_WARN:  return "ПРЕ";
+         case LOG_ERROR: return "ОШБ";
         }
       return "?";
      }

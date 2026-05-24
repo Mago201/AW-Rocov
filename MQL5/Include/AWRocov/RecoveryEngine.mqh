@@ -1,16 +1,16 @@
 //+------------------------------------------------------------------+
 //|  RecoveryEngine.mqh                                               |
-//|  Finite state machine driving the recovery process:               |
+//|  Конечный автомат, управляющий процессом восстановления:          |
 //|                                                                   |
-//|     IDLE --(loss > threshold)--> LOCKING --> AVERAGING            |
-//|        ^                                       |   ^              |
-//|        |                                       v   |              |
-//|        +---- CLOSING_ALL <-- (basket PnL >= TP)    |              |
-//|                                                    v              |
-//|                                            PARTIAL_CLOSING        |
+//|     ОЖИДАНИЕ --(убыток > порог)--> ЛОКИРОВАНИЕ --> УСРЕДНЕНИЕ     |
+//|         ^                                              |  ^       |
+//|         |                                              v  |       |
+//|         +-- ЗАКРЫТИЕ_ВСЕХ <-- (PnL корзины >= TP)         |       |
+//|                                                           v       |
+//|                                                ЧАСТИЧНОЕ_ЗАКРЫТИЕ |
 //|                                                                   |
-//|  All decisions are taken from the current basket snapshot, no     |
-//|  hidden state on the broker side.                                 |
+//|  Все решения принимаются на основе свежего снапшота корзины,      |
+//|  скрытого состояния на стороне брокера движок не предполагает.    |
 //+------------------------------------------------------------------+
 #ifndef __AWROCOV_RECOVERYENGINE_MQH__
 #define __AWROCOV_RECOVERYENGINE_MQH__
@@ -21,25 +21,25 @@
 
 enum ENUM_RECOVERY_STATE
   {
-   REC_IDLE             = 0,
-   REC_LOCKING          = 1,
-   REC_AVERAGING        = 2,
-   REC_PARTIAL_CLOSING  = 3,
-   REC_CLOSING_ALL      = 4
+   REC_IDLE             = 0,   // ожидание
+   REC_LOCKING          = 1,   // локирование
+   REC_AVERAGING        = 2,   // усреднение
+   REC_PARTIAL_CLOSING  = 3,   // частичное закрытие
+   REC_CLOSING_ALL      = 4    // закрытие всех
   };
 
 struct SRecoveryConfig
   {
-   double  loss_threshold_pct;          // trigger: floating loss as % of balance
-   double  loss_threshold_money;        // trigger: floating loss in account currency (0 = off)
-   bool    use_hedge_lock;
-   double  lock_volume_multiplier;
-   int     averaging_step_points;
-   double  averaging_lot_multiplier;
-   int     max_averaging_orders;
-   double  partial_close_pct;           // 1..100
-   int     partial_close_profit_points; // per-position profit (points) to trigger
-   double  basket_tp_money;             // close-all profit threshold
+   double  loss_threshold_pct;          // триггер: плавающий убыток в % от баланса
+   double  loss_threshold_money;        // триггер: плавающий убыток в валюте счёта (0 = выкл)
+   bool    use_hedge_lock;              // открывать хеджирующий замок
+   double  lock_volume_multiplier;      // множитель объёма замка
+   int     averaging_step_points;       // шаг сетки усреднения (пункты)
+   double  averaging_lot_multiplier;    // множитель лота усреднения
+   int     max_averaging_orders;        // потолок числа усреднений
+   double  partial_close_pct;           // % частичного закрытия [1..100]
+   int     partial_close_profit_points; // прибыль позиции в пунктах для триггера частичного закрытия
+   double  basket_tp_money;             // порог прибыли корзины для полного закрытия
   };
 
 class CRecoveryEngine
@@ -53,23 +53,23 @@ private:
    bool                  m_hedging_account;
 
    ENUM_RECOVERY_STATE   m_state;
-   int                   m_recovery_dir;      // +1 long, -1 short (set at trigger)
-   double                m_last_avg_price;    // price of the last averaging entry
-   double                m_last_avg_volume;   // volume used for the last averaging entry
-   int                   m_avg_count;         // averaging orders added so far
+   int                   m_recovery_dir;      // +1 лонг, -1 шорт (фиксируется на триггере)
+   double                m_last_avg_price;    // цена последнего усреднения
+   double                m_last_avg_volume;   // объём последнего усреднения
+   int                   m_avg_count;         // счётчик усреднений
    bool                  m_lock_done;
    datetime              m_state_since;
 
-   //--- Helpers ----------------------------------------------------
+   //--- Вспомогательное -------------------------------------------
    string                StateName(ENUM_RECOVERY_STATE s) const
      {
       switch(s)
         {
-         case REC_IDLE:            return "IDLE";
-         case REC_LOCKING:         return "LOCKING";
-         case REC_AVERAGING:       return "AVERAGING";
-         case REC_PARTIAL_CLOSING: return "PARTIAL_CLOSING";
-         case REC_CLOSING_ALL:     return "CLOSING_ALL";
+         case REC_IDLE:            return "ОЖИДАНИЕ";
+         case REC_LOCKING:         return "ЛОКИРОВАНИЕ";
+         case REC_AVERAGING:       return "УСРЕДНЕНИЕ";
+         case REC_PARTIAL_CLOSING: return "ЧАСТ_ЗАКРЫТИЕ";
+         case REC_CLOSING_ALL:     return "ЗАКРЫТИЕ_ВСЕХ";
         }
       return "?";
      }
@@ -78,7 +78,7 @@ private:
      {
       if(next == m_state) return;
       if(m_log)
-         m_log.Info(StringFormat("state: %s -> %s",
+         m_log.Info(StringFormat("состояние: %s -> %s",
                                  StateName(m_state), StateName(next)));
       m_state = next;
       m_state_since = TimeCurrent();
@@ -91,7 +91,7 @@ private:
 
    bool                  TriggerHit() const
      {
-      double loss = -m_basket.FloatingPnL(); // positive number when basket is in red
+      double loss = -m_basket.FloatingPnL(); // положительное число при убытке
       if(loss <= 0.0) return false;
 
       bool hit_pct   = (m_cfg.loss_threshold_pct > 0.0) &&
@@ -102,7 +102,7 @@ private:
       return hit_pct || hit_money;
      }
 
-   //--- Position profit measured in symbol points ------------------
+   //--- Прибыль позиции в пунктах символа --------------------------
    double                ProfitPoints(const ulong ticket) const
      {
       if(!PositionSelectByTicket(ticket)) return 0.0;
@@ -117,7 +117,7 @@ private:
       return 0.0;
      }
 
-   //--- State handlers --------------------------------------------
+   //--- Обработчики состояний -------------------------------------
    void                  OnIdle()
      {
       if(m_basket.IsEmpty())
@@ -128,7 +128,7 @@ private:
       m_recovery_dir = m_basket.NetDirection();
       if(m_recovery_dir == 0)
         {
-         if(m_log) m_log.Warn("Trigger hit but basket is balanced; skipping");
+         if(m_log) m_log.Warn("триггер сработал, но корзина сбалансирована; пропуск");
          return;
         }
 
@@ -141,7 +141,7 @@ private:
                           ? m_basket.Stats().buy_volume
                           : m_basket.Stats().sell_volume;
       if(m_log)
-         m_log.Info(StringFormat("trigger: dir=%d loss=%.2f base_lot=%.2f",
+         m_log.Info(StringFormat("триггер: направление=%d убыток=%.2f базовый_лот=%.2f",
                                  m_recovery_dir,
                                  -m_basket.FloatingPnL(),
                                  m_last_avg_volume));
@@ -153,7 +153,7 @@ private:
       if(!m_cfg.use_hedge_lock || !m_hedging_account)
         {
          if(m_log && !m_hedging_account && m_cfg.use_hedge_lock)
-            m_log.Warn("Hedge lock requested but account is netting; skipping lock");
+            m_log.Warn("запрошен хеджирующий замок, но счёт неттинговый; пропуск замка");
          m_lock_done = true;
          Transition(REC_AVERAGING);
          return;
@@ -166,12 +166,12 @@ private:
       ulong ticket = m_ops.OpenMarket(side, lock_vol, "AWRocov:lock");
       if(ticket == 0)
         {
-         if(m_log) m_log.Error("Lock open failed; staying in LOCKING");
+         if(m_log) m_log.Error("не удалось открыть замок; остаёмся в ЛОКИРОВАНИИ");
          return;
         }
       m_lock_done = true;
       if(m_log)
-         m_log.Info(StringFormat("lock opened: side=%s vol=%.2f",
+         m_log.Info(StringFormat("замок открыт: сторона=%s объём=%.2f",
                                  side == ORDER_TYPE_BUY ? "BUY" : "SELL",
                                  lock_vol));
       Transition(REC_AVERAGING);
@@ -179,25 +179,25 @@ private:
 
    void                  OnAveraging()
      {
-      // 1) Basket-level take profit closes everything
+      // 1) Достижение TP корзины — закрываем всё
       if(m_basket.FloatingPnL() >= m_cfg.basket_tp_money)
         {
          if(m_log)
-            m_log.Info(StringFormat("basket TP reached: pnl=%.2f >= %.2f",
+            m_log.Info(StringFormat("достигнут TP корзины: pnl=%.2f >= %.2f",
                                     m_basket.FloatingPnL(),
                                     m_cfg.basket_tp_money));
          Transition(REC_CLOSING_ALL);
          return;
         }
 
-      // 2) Any position eligible for partial close?
+      // 2) Есть ли позиция, готовая к частичному закрытию?
       if(HasPartialCloseCandidate())
         {
          Transition(REC_PARTIAL_CLOSING);
          return;
         }
 
-      // 3) Averaging step
+      // 3) Шаг усреднения
       TryAddAveraging();
      }
 
@@ -223,8 +223,8 @@ private:
 
       double price = (m_recovery_dir > 0) ? m_ops.Ask() : m_ops.Bid();
       double moved_points = (m_recovery_dir > 0)
-                            ? (m_last_avg_price - price) / pt   // long: averaging when price drops
-                            : (price - m_last_avg_price) / pt;  // short: averaging when price rises
+                            ? (m_last_avg_price - price) / pt   // лонг: усредняемся при падении
+                            : (price - m_last_avg_price) / pt;  // шорт: усредняемся при росте
 
       if(moved_points < (double)m_cfg.averaging_step_points)
          return;
@@ -235,14 +235,14 @@ private:
       ulong ticket = m_ops.OpenMarket(side, next_vol, "AWRocov:avg");
       if(ticket == 0)
         {
-         if(m_log) m_log.Error("Averaging open failed");
+         if(m_log) m_log.Error("не удалось открыть усредняющий ордер");
          return;
         }
       m_avg_count++;
       m_last_avg_price  = price;
       m_last_avg_volume = next_vol;
       if(m_log)
-         m_log.Info(StringFormat("avg #%d opened: side=%s vol=%.2f price=%.5f",
+         m_log.Info(StringFormat("усреднение #%d открыто: сторона=%s объём=%.2f цена=%.5f",
                                  m_avg_count,
                                  side == ORDER_TYPE_BUY ? "BUY" : "SELL",
                                  next_vol,
@@ -251,7 +251,7 @@ private:
 
    void                  OnPartialClosing()
      {
-      // Always re-check basket TP first to avoid wasted partial close
+      // Сначала повторно проверим TP корзины — чтобы не делать лишний partial close
       if(m_basket.FloatingPnL() >= m_cfg.basket_tp_money)
         {
          Transition(REC_CLOSING_ALL);
@@ -267,10 +267,10 @@ private:
 
          bool ok = m_ops.PartialClose(t, m_cfg.partial_close_pct);
          if(m_log)
-            m_log.Info(StringFormat("partial close ticket=%I64u pct=%.1f ok=%s",
+            m_log.Info(StringFormat("частичное закрытие ticket=%I64u %%=%.1f ok=%s",
                                     t, m_cfg.partial_close_pct,
-                                    ok ? "yes" : "no"));
-         break; // one position per tick is enough
+                                    ok ? "да" : "нет"));
+         break; // одна позиция за тик — достаточно
         }
 
       Transition(REC_AVERAGING);
@@ -278,8 +278,8 @@ private:
 
    void                  OnClosingAll()
      {
-      // Snapshot the tickets list, then close each. Basket will be
-      // refreshed on the next tick.
+      // Снимаем снимок списка тикетов и закрываем каждый. Корзина
+      // обновится на следующем тике.
       int n = m_basket.TicketsCount();
       int closed = 0;
       for(int i = 0; i < n; i++)
@@ -288,10 +288,10 @@ private:
          if(m_ops.ClosePosition(t)) closed++;
         }
       if(m_log)
-         m_log.Info(StringFormat("closing all: %d/%d closed", closed, n));
+         m_log.Info(StringFormat("закрытие всех: %d/%d закрыто", closed, n));
 
-      // Reset recovery context regardless of partial failures; remaining
-      // positions will be picked up by IDLE next tick if still in red.
+      // Сбрасываем контекст восстановления независимо от частичных
+      // ошибок; оставшиеся позиции подберёт ОЖИДАНИЕ на следующем тике.
       m_recovery_dir    = 0;
       m_last_avg_price  = 0.0;
       m_last_avg_volume = 0.0;
@@ -326,8 +326,8 @@ public:
       m_state       = REC_IDLE;
       m_state_since = TimeCurrent();
       if(m_log)
-         m_log.Info(StringFormat("engine init: hedging=%s",
-                                 m_hedging_account ? "yes" : "no"));
+         m_log.Info(StringFormat("инициализация движка: хеджирование=%s",
+                                 m_hedging_account ? "да" : "нет"));
       return true;
      }
 
@@ -344,7 +344,7 @@ public:
         }
      }
 
-   //--- For Comment() / external status -------------------------
+   //--- Для Comment() / внешнего статуса --------------------------
    ENUM_RECOVERY_STATE State()      const { return m_state; }
    string             StateString() const { return StateName(m_state); }
    int                AveragingCount() const { return m_avg_count; }

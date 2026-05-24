@@ -1,147 +1,151 @@
-# AW-Rocov v0.10 — Strategy specification
+# AW-Rocov v0.10 — Описание стратегии
 
-This document describes the algorithm implemented in `AWRocov.mq5`. It is
-the source of truth for the state machine, triggers, and exit rules.
+Этот документ описывает алгоритм, реализованный в `AWRocov.mq5`, и является
+источником истины по конечному автомату, триггерам и правилам выхода.
 
-## 1. Scope
+## 1. Назначение
 
-AW-Rocov is a **recovery-only** Expert Advisor:
+AW-Rocov — это **только recovery**-советник:
 
-- It does **not** produce entry signals.
-- It picks up positions that already exist on the chart symbol (filtered by
-  magic number when `InpManageOnlyOwnOrders = true`) and treats them as a
-  single basket.
-- Its job is to bring the basket from a floating loss back to a small,
-  configurable profit target.
+- Он **не** генерирует входные сигналы.
+- Он подбирает уже открытые позиции по символу графика (с фильтром
+  по magic-номеру при `InpManageOnlyOwnOrders = true`) и трактует их как
+  единую корзину.
+- Его задача — вернуть корзину из плавающего убытка к небольшой плановой
+  прибыли.
 
-## 2. Concepts
+## 2. Понятия
 
-- **Basket** — the set of positions matching `(symbol, magic-or-any)`. The
-  basket is re-snapshot at the beginning of every tick from broker state, so
-  the EA is stateless w.r.t. broker truth.
-- **Net direction** — `+1` if `BUY_volume > SELL_volume`, `-1` if
-  `SELL_volume > BUY_volume`, `0` if balanced.
-- **Recovery direction** — captured at trigger time and pinned for the
-  duration of the recovery cycle. It equals the net direction at that
-  moment. Subsequent lock/averaging decisions are made relative to this.
+- **Корзина** — множество позиций, удовлетворяющих условию
+  `(символ, magic-или-любой)`. Снапшот корзины полностью пересобирается
+  с состояния терминала на каждом тике, поэтому советник не несёт скрытого
+  состояния относительно брокера.
+- **Чистое направление** — `+1`, если `объём BUY > объём SELL`; `−1`, если
+  наоборот; `0`, если объёмы равны.
+- **Направление восстановления** — фиксируется в момент срабатывания
+  триггера и удерживается на всём цикле восстановления. Совпадает с чистым
+  направлением в этот момент. Все последующие решения о замке и
+  усреднениях принимаются относительно него.
 
-## 3. State machine
+## 3. Конечный автомат
 
 ```
-            +--------+
-            |  IDLE  |
-            +---+----+
-                |  loss >= threshold  (and basket not balanced)
-                v
-           +---------+
-           | LOCKING |
-           +----+----+
-                | lock opened (or skipped on netting)
-                v
-        +---------------+    partial profit found
-        |   AVERAGING   | -------------------------+
-        +---+-------+---+                          |
-            |       ^                              v
-            |       |                  +--------------------+
-            |       +----------------- |  PARTIAL_CLOSING   |
-            |                          +--------------------+
-            |  basket PnL >= TP
+            +-----------+
+            | ОЖИДАНИЕ  |
+            +-----+-----+
+                  |  убыток >= порог  (и корзина не сбалансирована)
+                  v
+            +------------+
+            | ЛОКИРОВАНИЕ|
+            +------+-----+
+                   | замок открыт (или пропущен на нетте)
+                   v
+        +-------------------+   найдена прибыльная позиция
+        |    УСРЕДНЕНИЕ     | -------------------------+
+        +---+-----------+---+                          |
+            |           ^                              v
+            |           |                +-------------------------+
+            |           +--------------- | ЧАСТИЧНОЕ_ЗАКРЫТИЕ      |
+            |                            +-------------------------+
+            |  PnL корзины >= TP
             v
-       +-----------+
-       | CLOSING_  |
-       |   ALL     |
-       +-----+-----+
-             | all closed
-             v
-          +-----+
-          | IDLE|
-          +-----+
+       +-----------------+
+       | ЗАКРЫТИЕ_ВСЕХ   |
+       +--------+--------+
+                | все закрыты
+                v
+          +-----------+
+          | ОЖИДАНИЕ  |
+          +-----------+
 ```
 
-### Transitions
+### Переходы
 
-| From              | Condition                                             | To                |
-| ----------------- | ----------------------------------------------------- | ----------------- |
-| `IDLE`            | `basket non-empty AND loss >= threshold AND dir != 0` | `LOCKING`         |
-| `LOCKING`         | `use_hedge_lock=false OR account is netting`          | `AVERAGING` (skip)|
-| `LOCKING`         | hedge order successfully opened                       | `AVERAGING`       |
-| `AVERAGING`       | `floating_pnl >= basket_tp_money`                     | `CLOSING_ALL`     |
-| `AVERAGING`       | any position profit >= partial threshold              | `PARTIAL_CLOSING` |
-| `AVERAGING`       | price moved `step` against last entry & cap not hit    | (stay) opens avg  |
-| `PARTIAL_CLOSING` | partial close attempted (success or fail)             | `AVERAGING`       |
-| `CLOSING_ALL`     | all close attempts done                               | `IDLE`            |
+| Из                    | Условие                                                | В                       |
+| --------------------- | ------------------------------------------------------ | ----------------------- |
+| `ОЖИДАНИЕ`            | `корзина не пуста И убыток >= порог И направление != 0`| `ЛОКИРОВАНИЕ`           |
+| `ЛОКИРОВАНИЕ`         | `use_hedge_lock=false ИЛИ счёт неттинговый`            | `УСРЕДНЕНИЕ` (пропуск)  |
+| `ЛОКИРОВАНИЕ`         | хеджирующий ордер успешно открыт                       | `УСРЕДНЕНИЕ`            |
+| `УСРЕДНЕНИЕ`          | `floating_pnl >= basket_tp_money`                      | `ЗАКРЫТИЕ_ВСЕХ`         |
+| `УСРЕДНЕНИЕ`          | прибыль какой-либо позиции >= порог частичного закрытия| `ЧАСТИЧНОЕ_ЗАКРЫТИЕ`    |
+| `УСРЕДНЕНИЕ`          | цена прошла `шаг` от последнего входа и потолок не достигнут | (остаёмся) добавляем усреднение |
+| `ЧАСТИЧНОЕ_ЗАКРЫТИЕ`  | попытка частичного закрытия выполнена (успешно или нет)| `УСРЕДНЕНИЕ`            |
+| `ЗАКРЫТИЕ_ВСЕХ`       | попытки закрытия завершены                             | `ОЖИДАНИЕ`              |
 
-## 4. Trigger
+## 4. Триггер
 
-The trigger fires when **either** condition holds:
+Триггер срабатывает, когда выполнено **хотя бы одно** из условий:
 
-- `loss >= balance × InpLossThresholdPct / 100`, with `InpLossThresholdPct > 0`
-- `loss >= InpLossThresholdMoney`, with `InpLossThresholdMoney > 0`
+- `убыток >= баланс × InpLossThresholdPct / 100`, при `InpLossThresholdPct > 0`
+- `убыток >= InpLossThresholdMoney`, при `InpLossThresholdMoney > 0`
 
-`loss` is `-floating_pnl` (positive when in red), summed across the basket
-including swap.
+`убыток` равен `-floating_pnl` (положителен в красной зоне) и суммируется
+по всей корзине, включая своп.
 
-## 5. Lock
+## 5. Замок
 
-If `InpUseHedgeLock = true` and the account is in
-`ACCOUNT_MARGIN_MODE_RETAIL_HEDGING`, an opposite-direction order is opened
-with volume `|net_volume| × InpLockVolumeMultiplier`. On netting accounts
-the lock is silently skipped (with a warning log) because hedging is not
-available.
+Если `InpUseHedgeLock = true` и счёт находится в режиме
+`ACCOUNT_MARGIN_MODE_RETAIL_HEDGING`, открывается встречный ордер с объёмом
+`|нетто_объём| × InpLockVolumeMultiplier`. На неттинговых счетах замок
+молча пропускается (с предупреждением в лог), потому что хеджирование
+там недоступно.
 
-## 6. Averaging
+## 6. Усреднение
 
-A new averaging order is added when **all** of the following hold:
+Новый усредняющий ордер добавляется, когда выполнены **все** условия:
 
 - `m_avg_count < InpMaxAveragingOrders`
-- price has moved at least `InpAveragingStepPoints` from `m_last_avg_price`
-  in the direction adverse to the recovery (price down for long-dir, price
-  up for short-dir)
+- цена прошла не менее `InpAveragingStepPoints` от `m_last_avg_price` в
+  направлении, противоположном восстановлению (вниз — для лонг-направления,
+  вверх — для шорт-направления)
 
-The volume of the new order is `m_last_avg_volume × InpAveragingLotMultiplier`,
-normalized to the symbol lot step / min / max. After a successful entry, the
-"last" trackers are updated and the averaging counter is incremented.
+Объём нового ордера равен `m_last_avg_volume × InpAveragingLotMultiplier`,
+нормализованный к шагу/минимуму/максимуму лота символа. После успешного
+открытия трекеры «последний» обновляются, счётчик усреднений увеличивается.
 
-## 7. Partial close
+## 7. Частичное закрытие
 
-For every basket position the EA computes:
+Для каждой позиции корзины советник вычисляет:
 
-- `profit_points(BUY)  = (Bid - open) / point`
-- `profit_points(SELL) = (open - Ask) / point`
+- `прибыль_пункты(BUY)  = (Bid - цена_открытия) / point`
+- `прибыль_пункты(SELL) = (цена_открытия - Ask) / point`
 
-If any position has `profit_points >= InpPartialCloseProfitPoints`, the
-state machine transitions to `PARTIAL_CLOSING` and closes
-`InpPartialClosePct%` of the **first** such position via
-`CTrade::PositionClosePartial`. One partial close per tick is performed to
-keep order activity moderate, then control returns to `AVERAGING`.
+Если у какой-либо позиции `прибыль_пункты >= InpPartialCloseProfitPoints`,
+автомат переходит в `ЧАСТИЧНОЕ_ЗАКРЫТИЕ` и закрывает `InpPartialClosePct%`
+**первой** такой позиции через `CTrade::PositionClosePartial`. За один тик
+делается одно частичное закрытие, чтобы умеренно ограничить активность
+торговых запросов, после чего управление возвращается в `УСРЕДНЕНИЕ`.
 
-## 8. Basket exit
+## 8. Выход из корзины
 
-Whenever `floating_pnl >= InpBasketTPMoney`, the EA transitions to
-`CLOSING_ALL`, iterates over the snapshot ticket list and closes each
-position. Recovery context (direction, counters) is reset and the state
-returns to `IDLE`. If any close fails, the next tick will pick the
-remaining positions back up either as a new basket or a new recovery cycle.
+Как только `floating_pnl >= InpBasketTPMoney`, автомат переходит в
+`ЗАКРЫТИЕ_ВСЕХ`, проходит по снимку списка тикетов и закрывает каждую
+позицию. Контекст восстановления (направление, счётчики) сбрасывается, и
+состояние возвращается в `ОЖИДАНИЕ`. Если какая-то позиция не закрылась,
+её подберёт следующий тик — либо как новую корзину, либо как новый цикл
+восстановления.
 
-## 9. Statelessness on broker truth
+## 9. Безсостоятельность относительно брокера
 
-The engine never assumes an order it intends to open actually exists. Every
-tick starts with `BasketManager::Refresh()` re-reading positions from the
-terminal. The only engine-local state that survives ticks is:
+Движок никогда не предполагает, что ордер, который он собирался открыть,
+действительно существует. Каждый тик начинается с
+`BasketManager::Refresh()`, перечитывающего позиции из терминала.
+Единственное локальное состояние движка, переживающее тики:
 
-- `m_state` (state machine state)
-- `m_recovery_dir`
+- `m_state` (состояние автомата)
+- `m_recovery_dir` (направление восстановления)
 - `m_last_avg_price`, `m_last_avg_volume`, `m_avg_count`
 - `m_lock_done`
 
-If the EA is restarted mid-cycle, it will restart in `IDLE` and re-engage as
-soon as the trigger condition is met again. This is intentional for v0.10:
-state persistence across restarts is left to a later version.
+Если EA перезапустить в середине цикла, он стартует в `ОЖИДАНИЕ` и
+повторно активируется, как только условие триггера снова выполнится.
+В v0.10 это сделано намеренно: персистентность состояния между
+перезапусками вынесена в более позднюю версию.
 
-## 10. Out of scope for v0.10
+## 10. Что **не** входит в v0.10
 
-- Trend / volatility / news / time-of-day filters
-- Multi-symbol baskets
-- Initial entry signal generation
-- Persistent engine state across restarts
-- Graphical control panel
+- Фильтры тренда / волатильности / новостей / времени дня
+- Корзины из нескольких символов
+- Генерация входных сигналов
+- Сохранение состояния движка между перезапусками
+- Графическая панель управления
