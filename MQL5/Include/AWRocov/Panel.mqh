@@ -1,26 +1,30 @@
 //+------------------------------------------------------------------+
 //|  Panel.mqh                                                        |
-//|  Простая ручная панель кнопок BUY / SELL / ЗАКРЫТЬ для тестера    |
-//|  и для ручного боевого использования. Кнопки — стандартные        |
-//|  объекты графика (OBJ_BUTTON), клики приходят через               |
-//|  CHARTEVENT_OBJECT_CLICK в OnChartEvent главного советника.       |
+//|  Простая ручная панель кнопок BUY / SELL / ЗАКРЫТЬ.               |
+//|  Сама не торгует — только идентифицирует кликнутую кнопку и       |
+//|  возвращает enum действия. Реальное OrderSend выполняется в EA    |
+//|  на ближайшем тике после клика, чтобы развести UI и торговлю.    |
 //+------------------------------------------------------------------+
 #ifndef __AWROCOV_PANEL_MQH__
 #define __AWROCOV_PANEL_MQH__
 
 #include "Logger.mqh"
-#include "TradeOps.mqh"
-#include "BasketManager.mqh"
+
+enum ENUM_PANEL_ACTION
+  {
+   PANEL_ACTION_NONE  = 0,
+   PANEL_ACTION_BUY   = 1,
+   PANEL_ACTION_SELL  = 2,
+   PANEL_ACTION_CLOSE = 3
+  };
 
 class CManualPanel
   {
 private:
-   CTradeOps        *m_ops;
-   CBasketManager   *m_basket;
    CLogger          *m_log;
    double            m_lot;
    bool              m_built;
-   int               m_origin_y;     // отступ всей панели от низа графика, пикс.
+   int               m_origin_y;
 
    //--- Имена объектов графика
    string            m_n_bg;
@@ -98,23 +102,17 @@ private:
      }
 
 public:
-                     CManualPanel(): m_ops(NULL), m_basket(NULL), m_log(NULL),
-                                     m_lot(0.01), m_built(false),
-                                     m_origin_y(80) {}
+                     CManualPanel(): m_log(NULL), m_lot(0.01),
+                                     m_built(false), m_origin_y(80) {}
 
-   void              Init(const double    lot,
-                          const int       origin_y,
-                          CTradeOps      *ops,
-                          CBasketManager *basket,
-                          CLogger        *log)
+   void              Init(const double lot,
+                          const int    origin_y,
+                          CLogger     *log)
      {
       m_lot      = lot;
       m_origin_y = origin_y;
-      m_ops      = ops;
-      m_basket   = basket;
       m_log      = log;
 
-      // Уникальные имена с префиксом, чтобы не конфликтовать с другими объектами
       m_n_bg    = "AWRocov_panel_bg";
       m_n_title = "AWRocov_panel_title";
       m_n_lot   = "AWRocov_panel_lot";
@@ -126,8 +124,6 @@ public:
    //--- Создать все объекты на графике
    void              Show()
      {
-      // Координаты считаются от нижнего левого угла графика (CORNER_LEFT_LOWER),
-      // y растёт ВВЕРХ. m_origin_y задаёт отступ всей панели от низа.
       const int base_x = 6;
       const int base_y = m_origin_y;
       const int pad    = 8;
@@ -136,11 +132,10 @@ public:
       const int gap    = 6;
 
       const int total_w = 3 * btn_w + 2 * gap + 2 * pad;
-      const int total_h = btn_h + 50;   // кнопки + подпись лота + заголовок + отступы
+      const int total_h = btn_h + 50;
 
       CreateBackground(m_n_bg, base_x, base_y, total_w, total_h);
 
-      // Низкая строка кнопок
       const int row_y = base_y + 8;
       int x = base_x + pad;
       CreateButton(m_n_buy,   x, row_y, btn_w, btn_h, "BUY",   C'40,140,70');
@@ -149,12 +144,10 @@ public:
       x += btn_w + gap;
       CreateButton(m_n_close, x, row_y, btn_w, btn_h, "CLOSE", C'80,80,90');
 
-      // Подпись лота над кнопками
       const int lot_y = row_y + btn_h + 4;
       string lot_text = StringFormat("Лот: %.2f", m_lot);
       CreateLabel(m_n_lot, base_x + pad, lot_y, lot_text, clrLightGray, 9);
 
-      // Заголовок над подписью лота
       const int title_y = lot_y + 14;
       CreateLabel(m_n_title, base_x + pad, title_y,
                   "AW-Rocov — ручное управление", clrSilver, 9);
@@ -180,61 +173,28 @@ public:
       ChartRedraw(0);
      }
 
-   //--- Принадлежит ли объект с данным именем нашей панели
-   bool              OwnsObject(const string clicked_name) const
+   //--- По имени объекта определить, какая кнопка кликнута
+   ENUM_PANEL_ACTION ActionFromClick(const string clicked_name) const
      {
-      return (clicked_name == m_n_buy
-           || clicked_name == m_n_sell
-           || clicked_name == m_n_close);
+      if(!m_built) return PANEL_ACTION_NONE;
+      if(clicked_name == m_n_buy)   return PANEL_ACTION_BUY;
+      if(clicked_name == m_n_sell)  return PANEL_ACTION_SELL;
+      if(clicked_name == m_n_close) return PANEL_ACTION_CLOSE;
+      return PANEL_ACTION_NONE;
      }
 
-   //--- Обработать клик. Возвращает true, если это была наша кнопка.
-   bool              OnClick(const string clicked_name)
+   string            ActionName(const ENUM_PANEL_ACTION a) const
      {
-      if(!m_built) return false;
-      if(!OwnsObject(clicked_name)) return false;
-      if(m_ops == NULL || m_basket == NULL)
+      switch(a)
         {
-         if(m_log != NULL) m_log.Error("панель: указатели не инициализированы");
-         return true;
+         case PANEL_ACTION_BUY:   return "BUY";
+         case PANEL_ACTION_SELL:  return "SELL";
+         case PANEL_ACTION_CLOSE: return "CLOSE";
         }
-
-      if(m_log != NULL)
-         m_log.Info("клик по кнопке панели: " + clicked_name);
-
-      if(clicked_name == m_n_buy)
-        {
-         ulong t = m_ops.OpenMarket(ORDER_TYPE_BUY, m_lot, "AWRocov:manual_buy");
-         if(m_log != NULL)
-            m_log.Info(StringFormat("ручной BUY: лот=%.2f ticket=%I64u %s",
-                                    m_lot, t, t == 0 ? "(ОШИБКА)" : ""));
-         return true;
-        }
-      if(clicked_name == m_n_sell)
-        {
-         ulong t = m_ops.OpenMarket(ORDER_TYPE_SELL, m_lot, "AWRocov:manual_sell");
-         if(m_log != NULL)
-            m_log.Info(StringFormat("ручной SELL: лот=%.2f ticket=%I64u %s",
-                                    m_lot, t, t == 0 ? "(ОШИБКА)" : ""));
-         return true;
-        }
-      if(clicked_name == m_n_close)
-        {
-         m_basket.Refresh();
-         int n = m_basket.TicketsCount();
-         int closed = 0;
-         for(int i = 0; i < n; i++)
-           {
-            ulong tk = m_basket.TicketAt(i);
-            if(m_ops.ClosePosition(tk)) closed++;
-           }
-         if(m_log != NULL)
-            m_log.Info(StringFormat("ручное CLOSE: закрыто %d/%d", closed, n));
-         return true;
-        }
-      return true;
+      return "NONE";
      }
 
+   double            Lot() const { return m_lot; }
    bool              IsBuilt() const { return m_built; }
   };
 

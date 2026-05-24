@@ -1,173 +1,307 @@
 //+------------------------------------------------------------------+
 //|  TradeOps.mqh                                                     |
-//|  Тонкая обёртка над CTrade с нормализацией цены и объёма          |
+//|  Низкоуровневая обёртка торговых операций. Использует голый       |
+//|  OrderSend (без CTrade), чтобы исключить «тихие» отказы из-за     |
+//|  несовпадающего filling-режима. Перебирает поддерживаемые         |
+//|  символом filling-режимы по очереди до первого успеха.            |
 //+------------------------------------------------------------------+
 #ifndef __AWROCOV_TRADEOPS_MQH__
 #define __AWROCOV_TRADEOPS_MQH__
 
-#include <Trade/Trade.mqh>
-#include <Trade/SymbolInfo.mqh>
 #include "Logger.mqh"
 
 class CTradeOps
   {
 private:
-   CTrade            m_trade;
-   CSymbolInfo       m_sym;
    CLogger          *m_log;
    string            m_symbol;
    ulong             m_magic;
+   ulong             m_deviation;
+
+   //--- Подобрать список filling-режимов в порядке предпочтения
+   int               BuildFillingList(ENUM_ORDER_TYPE_FILLING &out[]) const
+     {
+      ArrayResize(out, 3);
+      int n = 0;
+      long ff = SymbolInfoInteger(m_symbol, SYMBOL_FILLING_MODE);
+      if((ff & SYMBOL_FILLING_FOK) != 0) out[n++] = ORDER_FILLING_FOK;
+      if((ff & SYMBOL_FILLING_IOC) != 0) out[n++] = ORDER_FILLING_IOC;
+      out[n++] = ORDER_FILLING_RETURN;        // всегда есть как запасной
+      ArrayResize(out, n);
+      return n;
+     }
+
+   string            FillingName(const ENUM_ORDER_TYPE_FILLING f) const
+     {
+      switch(f)
+        {
+         case ORDER_FILLING_FOK:    return "FOK";
+         case ORDER_FILLING_IOC:    return "IOC";
+         case ORDER_FILLING_RETURN: return "RETURN";
+        }
+      return "?";
+     }
 
 public:
-                     CTradeOps(): m_log(NULL) {}
+                     CTradeOps(): m_log(NULL), m_deviation(20) {}
 
    bool              Init(const string symbol,
                           const ulong  magic,
                           const ulong  deviation_points,
                           CLogger     *logger)
      {
-      m_symbol = symbol;
-      m_magic  = magic;
-      m_log    = logger;
+      m_symbol    = symbol;
+      m_magic     = magic;
+      m_deviation = deviation_points;
+      m_log       = logger;
 
-      if(!m_sym.Name(symbol))
+      // Принудительно подгружаем символ в Market Watch — без этого
+      // SymbolInfoTick может вернуть нули, и OrderSend упадёт.
+      if(!SymbolSelect(symbol, true))
         {
-         if(m_log) m_log.Error("не удалось инициализировать CSymbolInfo для " + symbol);
+         if(m_log) m_log.Error("Init: не удалось выбрать символ " + symbol);
          return false;
         }
-      m_sym.RefreshRates();
-
-      m_trade.SetExpertMagicNumber(magic);
-      m_trade.SetDeviationInPoints(deviation_points);
-      m_trade.SetTypeFillingBySymbol(symbol);
-      m_trade.SetMarginMode();
       return true;
      }
 
-   //--- Нормализация объёма к шагу/минимуму/максимуму символа
-   double            NormalizeVolume(double volume)
+   //--- Нормализация объёма к шагу/мин/макс символа
+   double            NormalizeVolume(const double volume) const
      {
-      m_sym.Refresh();
-      double step = m_sym.LotsStep();
-      double mn   = m_sym.LotsMin();
-      double mx   = m_sym.LotsMax();
+      double step = SymbolInfoDouble(m_symbol, SYMBOL_VOLUME_STEP);
+      double mn   = SymbolInfoDouble(m_symbol, SYMBOL_VOLUME_MIN);
+      double mx   = SymbolInfoDouble(m_symbol, SYMBOL_VOLUME_MAX);
       if(step <= 0.0) step = 0.01;
 
       double v = MathFloor(volume / step + 0.0000001) * step;
       if(v < mn) v = mn;
       if(v > mx) v = mx;
 
-      // округление до количества знаков шага лота
       int digits = (int)MathMax(0, -MathLog10(step));
-      v = NormalizeDouble(v, digits);
-      return v;
+      return NormalizeDouble(v, digits);
      }
 
-   double            NormalizePrice(double price)
+   double            Point() const  { return SymbolInfoDouble(m_symbol, SYMBOL_POINT); }
+   double            Bid()
      {
-      return NormalizeDouble(price, (int)m_sym.Digits());
+      MqlTick t; if(SymbolInfoTick(m_symbol, t)) return t.bid;
+      return SymbolInfoDouble(m_symbol, SYMBOL_BID);
+     }
+   double            Ask()
+     {
+      MqlTick t; if(SymbolInfoTick(m_symbol, t)) return t.ask;
+      return SymbolInfoDouble(m_symbol, SYMBOL_ASK);
      }
 
-   double            Point() { m_sym.Refresh(); return m_sym.Point(); }
-   double            Bid()   { m_sym.RefreshRates(); return m_sym.Bid(); }
-   double            Ask()   { m_sym.RefreshRates(); return m_sym.Ask(); }
-
-   //--- Открыть рыночный ордер; возвращает тикет или 0 при ошибке
+   //+----------------------------------------------------------------+
+   //| Открыть рыночный ордер. Возвращает order ticket или 0.         |
+   //+----------------------------------------------------------------+
    ulong             OpenMarket(const ENUM_ORDER_TYPE type,
                                 const double          volume,
                                 const string          comment)
      {
-      // Pre-flight проверки — чем раньше отвалимся с понятной причиной,
-      // тем меньше времени уходит на гадание «почему не открывает».
+      // === Pre-flight ===
       if(!(bool)TerminalInfoInteger(TERMINAL_TRADE_ALLOWED))
         {
-         if(m_log) m_log.Error("OpenMarket: торговля запрещена в терминале (AutoTrading выключен или нет прав)");
+         if(m_log) m_log.Error("OpenMarket: торговля запрещена в терминале (выкл. AutoTrading)");
          return 0;
         }
       if(!(bool)MQLInfoInteger(MQL_TRADE_ALLOWED))
         {
-         if(m_log) m_log.Error("OpenMarket: торговля запрещена для этого советника (галка 'Allow Algo Trading' в свойствах EA)");
+         if(m_log) m_log.Error("OpenMarket: торговля запрещена для этого EA (галка 'Allow Algo Trading' в свойствах EA)");
          return 0;
         }
       if(!(bool)AccountInfoInteger(ACCOUNT_TRADE_ALLOWED))
         {
-         if(m_log) m_log.Error("OpenMarket: торговля запрещена для этого счёта");
+         if(m_log) m_log.Error("OpenMarket: торговля запрещена для счёта");
+         return 0;
+        }
+
+      if(!SymbolSelect(m_symbol, true))
+        {
+         if(m_log) m_log.Error("OpenMarket: не удалось выбрать символ " + m_symbol);
          return 0;
         }
 
       double v = NormalizeVolume(volume);
       if(v <= 0.0)
         {
-         if(m_log) m_log.Warn("OpenMarket: нормализованный объём = 0");
+         if(m_log) m_log.Error(StringFormat("OpenMarket: нормализованный объём = 0 (запрошено %.2f)", volume));
          return 0;
         }
 
-      // Освежим котировки прямо перед отправкой
-      m_sym.RefreshRates();
-
-      bool ok = false;
-      if(type == ORDER_TYPE_BUY)
-         ok = m_trade.Buy(v, m_symbol, 0.0, 0.0, 0.0, comment);
-      else if(type == ORDER_TYPE_SELL)
-         ok = m_trade.Sell(v, m_symbol, 0.0, 0.0, 0.0, comment);
-      else
+      MqlTick tick;
+      if(!SymbolInfoTick(m_symbol, tick) || tick.bid <= 0.0 || tick.ask <= 0.0)
         {
-         if(m_log) m_log.Error("OpenMarket: неподдерживаемый тип ордера");
+         if(m_log) m_log.Error(StringFormat("OpenMarket: SymbolInfoTick дал bid=%.5f ask=%.5f", tick.bid, tick.ask));
          return 0;
         }
 
-      if(!ok)
+      double price = (type == ORDER_TYPE_BUY) ? tick.ask : tick.bid;
+
+      // === Сборка запроса ===
+      MqlTradeRequest req; ZeroMemory(req);
+      MqlTradeResult  res; ZeroMemory(res);
+
+      req.action       = TRADE_ACTION_DEAL;
+      req.symbol       = m_symbol;
+      req.volume       = v;
+      req.type         = type;
+      req.price        = NormalizeDouble(price, (int)SymbolInfoInteger(m_symbol, SYMBOL_DIGITS));
+      req.deviation    = m_deviation;
+      req.magic        = m_magic;
+      req.comment      = comment;
+      req.type_time    = ORDER_TIME_GTC;
+
+      // === Попытки с разными filling-режимами ===
+      ENUM_ORDER_TYPE_FILLING fills[];
+      int fc = BuildFillingList(fills);
+
+      for(int i = 0; i < fc; i++)
         {
+         req.type_filling = fills[i];
+         ZeroMemory(res);
+
+         ResetLastError();
+         bool sent = OrderSend(req, res);
+
          if(m_log)
-            m_log.Error(StringFormat(
-               "OpenMarket не удался: retcode=%u (%s) err=%d, "
-               "symbol=%s lot=%.2f bid=%.5f ask=%.5f free_margin=%.2f",
-               m_trade.ResultRetcode(),
-               m_trade.ResultRetcodeDescription(),
-               GetLastError(),
-               m_symbol, v,
-               m_sym.Bid(), m_sym.Ask(),
-               AccountInfoDouble(ACCOUNT_MARGIN_FREE)));
-         return 0;
+            m_log.Info(StringFormat(
+               "OrderSend [%s] sent=%s retcode=%u (%s) deal=%I64u order=%I64u err=%d",
+               FillingName(fills[i]),
+               sent ? "true" : "false",
+               res.retcode, res.comment,
+               res.deal, res.order,
+               GetLastError()));
+
+         if(sent &&
+            (res.retcode == TRADE_RETCODE_DONE ||
+             res.retcode == TRADE_RETCODE_PLACED ||
+             res.retcode == TRADE_RETCODE_DONE_PARTIAL))
+           {
+            if(m_log)
+               m_log.Info(StringFormat(
+                  "OpenMarket OK: order=%I64u deal=%I64u price=%.5f vol=%.2f filling=%s",
+                  res.order, res.deal, res.price, res.volume,
+                  FillingName(fills[i])));
+            return res.order;
+           }
+
+         // Меняет ли смысл пробовать другой filling? Только если ругался
+         // именно на filling. На любую другую ошибку выходим сразу.
+         if(res.retcode != TRADE_RETCODE_INVALID_FILL &&
+            res.retcode != 0)
+            break;
         }
 
-      // Сделка прошла, но мог быть deal без позиции (редкий случай).
-      ulong order_id = m_trade.ResultOrder();
       if(m_log)
-         m_log.Info(StringFormat("OpenMarket OK: order=%I64u retcode=%u (%s)",
-                                 order_id,
-                                 m_trade.ResultRetcode(),
-                                 m_trade.ResultRetcodeDescription()));
-      return order_id;
+         m_log.Error(StringFormat(
+            "OpenMarket FAILED: type=%s lot=%.2f price=%.5f symbol=%s "
+            "retcode=%u (%s) bid=%.5f ask=%.5f free_margin=%.2f",
+            type == ORDER_TYPE_BUY ? "BUY" : "SELL",
+            v, price, m_symbol,
+            res.retcode, res.comment,
+            tick.bid, tick.ask,
+            AccountInfoDouble(ACCOUNT_MARGIN_FREE)));
+      return 0;
      }
 
-   //--- Полное закрытие позиции по тикету
+   //+----------------------------------------------------------------+
+   //| Полное закрытие позиции по тикету. true при успехе.            |
+   //+----------------------------------------------------------------+
    bool              ClosePosition(const ulong ticket)
      {
       if(!PositionSelectByTicket(ticket))
+        {
+         if(m_log) m_log.Warn(StringFormat("Close: нет позиции ticket=%I64u", ticket));
          return false;
-      bool ok = m_trade.PositionClose(ticket);
-      if(!ok && m_log != NULL)
-         m_log.Error(StringFormat("закрытие не удалось ticket=%I64u retcode=%u",
-                                  ticket, m_trade.ResultRetcode()));
-      return ok;
+        }
+      string sym  = PositionGetString(POSITION_SYMBOL);
+      long   ptype= PositionGetInteger(POSITION_TYPE);
+      double vol  = PositionGetDouble(POSITION_VOLUME);
+
+      MqlTick tick;
+      if(!SymbolInfoTick(sym, tick)) return false;
+
+      MqlTradeRequest req; ZeroMemory(req);
+      MqlTradeResult  res; ZeroMemory(res);
+      req.action    = TRADE_ACTION_DEAL;
+      req.position  = ticket;
+      req.symbol    = sym;
+      req.volume    = vol;
+      req.type      = (ptype == POSITION_TYPE_BUY) ? ORDER_TYPE_SELL : ORDER_TYPE_BUY;
+      req.price     = (ptype == POSITION_TYPE_BUY) ? tick.bid : tick.ask;
+      req.deviation = m_deviation;
+      req.magic     = m_magic;
+      req.comment   = "AWRocov:close";
+      req.type_time = ORDER_TIME_GTC;
+
+      ENUM_ORDER_TYPE_FILLING fills[];
+      int fc = BuildFillingList(fills);
+      for(int i = 0; i < fc; i++)
+        {
+         req.type_filling = fills[i];
+         ZeroMemory(res);
+         if(OrderSend(req, res) &&
+            (res.retcode == TRADE_RETCODE_DONE ||
+             res.retcode == TRADE_RETCODE_PLACED))
+            return true;
+         if(res.retcode != TRADE_RETCODE_INVALID_FILL && res.retcode != 0) break;
+        }
+
+      if(m_log)
+         m_log.Error(StringFormat("Close FAILED ticket=%I64u retcode=%u (%s)",
+                                  ticket, res.retcode, res.comment));
+      return false;
      }
 
-   //--- Частичное закрытие; pct в диапазоне [1..100]
+   //+----------------------------------------------------------------+
+   //| Частичное закрытие. pct в диапазоне (0..100].                  |
+   //+----------------------------------------------------------------+
    bool              PartialClose(const ulong ticket, const double pct)
      {
-      if(!PositionSelectByTicket(ticket))
-         return false;
+      if(!PositionSelectByTicket(ticket)) return false;
       double full   = PositionGetDouble(POSITION_VOLUME);
       double target = NormalizeVolume(full * pct / 100.0);
       if(target <= 0.0 || target >= full)
          return ClosePosition(ticket);
 
-      bool ok = m_trade.PositionClosePartial(ticket, target);
-      if(!ok && m_log != NULL)
-         m_log.Error(StringFormat("частичное закрытие не удалось ticket=%I64u retcode=%u",
-                                  ticket, m_trade.ResultRetcode()));
-      return ok;
+      string sym   = PositionGetString(POSITION_SYMBOL);
+      long   ptype = PositionGetInteger(POSITION_TYPE);
+
+      MqlTick tick;
+      if(!SymbolInfoTick(sym, tick)) return false;
+
+      MqlTradeRequest req; ZeroMemory(req);
+      MqlTradeResult  res; ZeroMemory(res);
+      req.action    = TRADE_ACTION_DEAL;
+      req.position  = ticket;
+      req.symbol    = sym;
+      req.volume    = target;
+      req.type      = (ptype == POSITION_TYPE_BUY) ? ORDER_TYPE_SELL : ORDER_TYPE_BUY;
+      req.price     = (ptype == POSITION_TYPE_BUY) ? tick.bid : tick.ask;
+      req.deviation = m_deviation;
+      req.magic     = m_magic;
+      req.comment   = "AWRocov:partial";
+      req.type_time = ORDER_TIME_GTC;
+
+      ENUM_ORDER_TYPE_FILLING fills[];
+      int fc = BuildFillingList(fills);
+      for(int i = 0; i < fc; i++)
+        {
+         req.type_filling = fills[i];
+         ZeroMemory(res);
+         if(OrderSend(req, res) &&
+            (res.retcode == TRADE_RETCODE_DONE ||
+             res.retcode == TRADE_RETCODE_PLACED))
+            return true;
+         if(res.retcode != TRADE_RETCODE_INVALID_FILL && res.retcode != 0) break;
+        }
+
+      if(m_log)
+         m_log.Error(StringFormat("PartialClose FAILED ticket=%I64u retcode=%u (%s)",
+                                  ticket, res.retcode, res.comment));
+      return false;
      }
   };
 

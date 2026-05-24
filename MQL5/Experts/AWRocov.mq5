@@ -1,20 +1,10 @@
 //+------------------------------------------------------------------+
 //|                                                       AWRocov.mq5 |
 //|                                AW-Rocov: чистый recovery EA (MT5) |
-//|                                                                   |
-//|  Ядро стратегии: замок убыточной корзины + сетка усреднения       |
-//|  + частичный TP. Этот EA НЕ генерирует входные сигналы. Он        |
-//|  управляет уже существующими позициями (открытыми вручную или    |
-//|  другими EA с тем же magic) и пытается вернуть корзину к          |
-//|  небольшой плановой прибыли.                                      |
-//|                                                                   |
-//|  Также есть простая панель ручного управления (BUY/SELL/CLOSE),  |
-//|  чтобы открывать тестовые позиции прямо в Strategy Tester или    |
-//|  на живом счёте.                                                  |
 //+------------------------------------------------------------------+
 #property copyright "AW-Rocov"
 #property link      "https://github.com/Mago201/AW-Rocov"
-#property version   "0.12"
+#property version   "0.13"
 #property strict
 #property description "Чистый recovery EA: замок + усреднение + частичный TP."
 #property description "Управляет существующей корзиной + панель ручных кнопок BUY/SELL/CLOSE."
@@ -50,11 +40,11 @@ input double InpPartialClosePct          = 50.0;       // % закрытия (1.
 input int    InpPartialCloseProfitPoints = 200;        // прибыль позиции (пункты) для триггера
 
 input group "=== Выход из корзины ==="
-input double InpBasketTPMoney            = 10.0;       // прибыль корзины для полного закрытия (валюта счёта)
+input double InpBasketTPMoney            = 10.0;       // прибыль корзины для полного закрытия
 
 input group "=== Торговля ==="
-input ulong  InpDeviationPoints          = 20;         // допустимое проскальзывание (пункты)
-input ENUM_LOG_LEVEL InpLogLevel         = LOG_INFO;   // уровень логов: ОТЛ/ИНФ/ПРЕ/ОШБ
+input ulong  InpDeviationPoints          = 30;         // допустимое проскальзывание (пункты)
+input ENUM_LOG_LEVEL InpLogLevel         = LOG_INFO;   // уровень логов
 
 input group "=== Ручная панель ==="
 input bool   InpShowManualPanel          = true;       // показывать кнопки на графике
@@ -70,44 +60,35 @@ CTradeOps        g_ops;
 CRecoveryEngine  g_engine;
 CManualPanel     g_panel;
 
-// Диагностика: счётчик и описание последнего клика, чтобы видеть его
-// прямо на графике без зависимости от настроек журнала.
-int      g_click_counter   = 0;
-string   g_last_click_name  = "(нет)";
-datetime g_last_click_time  = 0;
+// Очередь действий из панели: клик ставит флаг, OnTick исполняет.
+ENUM_PANEL_ACTION g_pending_action = PANEL_ACTION_NONE;
 
-//+------------------------------------------------------------------+
-//|  Валидация параметров                                             |
+// Диагностика
+int      g_click_counter   = 0;
+string   g_last_click_name = "(нет)";
+datetime g_last_click_time = 0;
+string   g_last_action_msg = "—";
+
 //+------------------------------------------------------------------+
 bool ValidateInputs()
   {
    if(InpLossThresholdPct < 0.0 || InpLossThresholdMoney < 0.0)
      { Print("Некорректные пороги убытка"); return false; }
    if(InpLossThresholdPct == 0.0 && InpLossThresholdMoney == 0.0)
-     { Print("Хотя бы один порог убытка (% или деньги) должен быть > 0"); return false; }
-   if(InpLockVolumeMultiplier <= 0.0)
-     { Print("InpLockVolumeMultiplier должен быть > 0"); return false; }
-   if(InpAveragingStepPoints <= 0)
-     { Print("InpAveragingStepPoints должен быть > 0"); return false; }
-   if(InpAveragingLotMultiplier <= 0.0)
-     { Print("InpAveragingLotMultiplier должен быть > 0"); return false; }
-   if(InpMaxAveragingOrders < 0)
-     { Print("InpMaxAveragingOrders должен быть >= 0"); return false; }
+     { Print("Хотя бы один порог убытка должен быть > 0"); return false; }
+   if(InpLockVolumeMultiplier <= 0.0)        { Print("InpLockVolumeMultiplier > 0"); return false; }
+   if(InpAveragingStepPoints  <= 0)          { Print("InpAveragingStepPoints > 0"); return false; }
+   if(InpAveragingLotMultiplier <= 0.0)      { Print("InpAveragingLotMultiplier > 0"); return false; }
+   if(InpMaxAveragingOrders < 0)             { Print("InpMaxAveragingOrders >= 0"); return false; }
    if(InpPartialClosePct <= 0.0 || InpPartialClosePct > 100.0)
-     { Print("InpPartialClosePct должен быть в (0..100]"); return false; }
-   if(InpPartialCloseProfitPoints <= 0)
-     { Print("InpPartialCloseProfitPoints должен быть > 0"); return false; }
-   if(InpBasketTPMoney <= 0.0)
-     { Print("InpBasketTPMoney должен быть > 0"); return false; }
-   if(InpManualLot <= 0.0)
-     { Print("InpManualLot должен быть > 0"); return false; }
-   if(InpPanelOriginY < 0)
-     { Print("InpPanelOriginY должен быть >= 0"); return false; }
+                                             { Print("InpPartialClosePct in (0..100]"); return false; }
+   if(InpPartialCloseProfitPoints <= 0)      { Print("InpPartialCloseProfitPoints > 0"); return false; }
+   if(InpBasketTPMoney <= 0.0)               { Print("InpBasketTPMoney > 0"); return false; }
+   if(InpManualLot <= 0.0)                   { Print("InpManualLot > 0"); return false; }
+   if(InpPanelOriginY < 0)                   { Print("InpPanelOriginY >= 0"); return false; }
    return true;
   }
 
-//+------------------------------------------------------------------+
-//|  Инициализация / деинициализация                                  |
 //+------------------------------------------------------------------+
 int OnInit()
   {
@@ -140,34 +121,25 @@ int OnInit()
                      GetPointer(g_log),
                      GetPointer(g_basket),
                      GetPointer(g_ops)))
-     {
-      g_log.Error("инициализация движка не удалась");
-      return INIT_FAILED;
-     }
+     { g_log.Error("инициализация движка не удалась"); return INIT_FAILED; }
 
-   // Панель ручного управления — пропускаем в режиме оптимизации
-   // (объекты графика там не имеют смысла и только засоряют логи).
    bool in_optimization = (bool)MQLInfoInteger(MQL_OPTIMIZATION);
-   bool show_panel = InpShowManualPanel && !in_optimization;
+   bool show_panel      = InpShowManualPanel && !in_optimization;
 
-   g_panel.Init(InpManualLot,
-                InpPanelOriginY,
-                GetPointer(g_ops),
-                GetPointer(g_basket),
-                GetPointer(g_log));
-   if(show_panel)
-      g_panel.Show();
+   g_panel.Init(InpManualLot, InpPanelOriginY, GetPointer(g_log));
+   if(show_panel) g_panel.Show();
 
-   // В тестере без визуального режима кнопки бесполезны — подскажем пользователю
    if((bool)MQLInfoInteger(MQL_TESTER) && !(bool)MQLInfoInteger(MQL_VISUAL_MODE)
       && InpShowManualPanel && !in_optimization)
-     {
-      g_log.Warn("тестер БЕЗ визуального режима — кнопки панели не будут реагировать на клики");
-     }
+      g_log.Warn("тестер БЕЗ Visual Mode — клики кнопок не доходят");
 
-   g_log.Info(StringFormat("AWRocov v0.12 запущен на %s magic=%I64u panel=%s",
+   g_log.Info(StringFormat("AWRocov v0.13 запущен на %s magic=%I64u panel=%s "
+                           "term_trade=%s mql_trade=%s acc_trade=%s",
                            _Symbol, InpMagic,
-                           show_panel ? "да" : "нет"));
+                           show_panel ? "да" : "нет",
+                           (bool)TerminalInfoInteger(TERMINAL_TRADE_ALLOWED) ? "да" : "нет",
+                           (bool)MQLInfoInteger(MQL_TRADE_ALLOWED) ? "да" : "нет",
+                           (bool)AccountInfoInteger(ACCOUNT_TRADE_ALLOWED) ? "да" : "нет"));
    return INIT_SUCCEEDED;
   }
 
@@ -179,7 +151,7 @@ void OnDeinit(const int reason)
   }
 
 //+------------------------------------------------------------------+
-//|  События графика — клики по кнопкам                               |
+//|  Клик по объекту графика                                          |
 //+------------------------------------------------------------------+
 void OnChartEvent(const int       id,
                   const long     &lparam,
@@ -189,47 +161,84 @@ void OnChartEvent(const int       id,
    if(id != CHARTEVENT_OBJECT_CLICK)
       return;
 
-   // Голый Print() — попадает в журнал НЕЗАВИСИМО от уровня логирования.
-   // Если этой строки в журнале нет — клик до EA не доходит вообще.
-   PrintFormat("[AWRocov] *** CLICK *** sparam=%s lparam=%I64d", sparam, lparam);
+   // Голый Print — попадает в журнал НЕЗАВИСИМО от уровня логирования.
+   PrintFormat("[AWRocov] *** CLICK *** sparam=%s", sparam);
 
-   // Счётчик и метка для статусной плашки на графике
    g_click_counter++;
    g_last_click_name = sparam;
    g_last_click_time = TimeCurrent();
 
-   // То же через логгер (если уровень >= INFO)
-   g_log.Info("OnChartEvent клик по объекту: " + sparam);
-
-   if(g_panel.OnClick(sparam))
+   ENUM_PANEL_ACTION act = g_panel.ActionFromClick(sparam);
+   if(act != PANEL_ACTION_NONE)
      {
-      // Кнопка визуально остаётся "нажатой" — снимаем состояние
+      g_pending_action = act;
+      g_last_action_msg = StringFormat("в очереди: %s", g_panel.ActionName(act));
+      g_log.Info("ставим в очередь: " + g_panel.ActionName(act));
+
+      // Сбросить визуально нажатую кнопку
       ObjectSetInteger(0, sparam, OBJPROP_STATE, false);
       ChartRedraw(0);
      }
   }
 
 //+------------------------------------------------------------------+
-//|  Тик                                                              |
+//|  Обработать действие из очереди (вызывается из OnTick)            |
+//+------------------------------------------------------------------+
+void ProcessPendingAction()
+  {
+   if(g_pending_action == PANEL_ACTION_NONE)
+      return;
+
+   ENUM_PANEL_ACTION act = g_pending_action;
+   g_pending_action = PANEL_ACTION_NONE;
+
+   switch(act)
+     {
+      case PANEL_ACTION_BUY:
+        {
+         ulong t = g_ops.OpenMarket(ORDER_TYPE_BUY, InpManualLot, "AWRocov:manual_buy");
+         g_last_action_msg = StringFormat("BUY %.2f -> ticket=%I64u", InpManualLot, t);
+         break;
+        }
+      case PANEL_ACTION_SELL:
+        {
+         ulong t = g_ops.OpenMarket(ORDER_TYPE_SELL, InpManualLot, "AWRocov:manual_sell");
+         g_last_action_msg = StringFormat("SELL %.2f -> ticket=%I64u", InpManualLot, t);
+         break;
+        }
+      case PANEL_ACTION_CLOSE:
+        {
+         g_basket.Refresh();
+         int n = g_basket.TicketsCount();
+         int closed = 0;
+         for(int i = 0; i < n; i++)
+            if(g_ops.ClosePosition(g_basket.TicketAt(i))) closed++;
+         g_last_action_msg = StringFormat("CLOSE %d/%d", closed, n);
+         break;
+        }
+      default: break;
+     }
+  }
+
 //+------------------------------------------------------------------+
 void OnTick()
   {
+   ProcessPendingAction();
    g_engine.Tick();
    UpdateStatusComment();
   }
 
 //+------------------------------------------------------------------+
-//|  Статусная плашка на графике                                      |
-//+------------------------------------------------------------------+
 void UpdateStatusComment()
   {
    const SBasketStats st = g_basket.Stats();
    string s = StringFormat(
-      "AWRocov v0.12 | %s | magic=%I64u\n"
+      "AWRocov v0.13 | %s | magic=%I64u\n"
       "состояние: %-18s   направление: %+d   замок: %s\n"
       "корзина: BUY %d (%.2f лот @ %.5f) | SELL %d (%.2f лот @ %.5f)\n"
       "плавающий PnL: %.2f   усреднений: %d/%d\n"
-      "кликов получено: %d   последний: %s @ %s",
+      "клики: %d   последний: %s @ %s\n"
+      "последнее действие: %s",
       _Symbol, InpMagic,
       g_engine.StateString(), g_engine.RecoveryDir(),
       g_engine.LockOpened() ? "да" : "нет",
@@ -238,7 +247,8 @@ void UpdateStatusComment()
       st.floating_pnl,
       g_engine.AveragingCount(), InpMaxAveragingOrders,
       g_click_counter, g_last_click_name,
-      g_last_click_time == 0 ? "—" : TimeToString(g_last_click_time, TIME_SECONDS));
+      g_last_click_time == 0 ? "—" : TimeToString(g_last_click_time, TIME_SECONDS),
+      g_last_action_msg);
    Comment(s);
   }
 //+------------------------------------------------------------------+
