@@ -152,7 +152,7 @@ private:
      {
       if(!m_cfg.use_hedge_lock || !m_hedging_account)
         {
-         if(m_log && !m_hedging_account && m_cfg.use_hedge_lock)
+         if(m_log != NULL && !m_hedging_account && m_cfg.use_hedge_lock)
             m_log.Warn("запрошен хеджирующий замок, но счёт неттинговый; пропуск замка");
          m_lock_done = true;
          Transition(REC_AVERAGING);

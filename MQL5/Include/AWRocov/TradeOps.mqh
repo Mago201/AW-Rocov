@@ -112,7 +112,7 @@ public:
       if(!PositionSelectByTicket(ticket))
          return false;
       bool ok = m_trade.PositionClose(ticket);
-      if(!ok && m_log)
+      if(!ok && m_log != NULL)
          m_log.Error(StringFormat("закрытие не удалось ticket=%I64u retcode=%u",
                                   ticket, m_trade.ResultRetcode()));
       return ok;
@@ -129,7 +129,7 @@ public:
          return ClosePosition(ticket);
 
       bool ok = m_trade.PositionClosePartial(ticket, target);
-      if(!ok && m_log)
+      if(!ok && m_log != NULL)
          m_log.Error(StringFormat("частичное закрытие не удалось ticket=%I64u retcode=%u",
                                   ticket, m_trade.ResultRetcode()));
       return ok;
