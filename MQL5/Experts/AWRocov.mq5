@@ -14,7 +14,7 @@
 //+------------------------------------------------------------------+
 #property copyright "AW-Rocov"
 #property link      "https://github.com/Mago201/AW-Rocov"
-#property version   "0.11"
+#property version   "0.12"
 #property strict
 #property description "Чистый recovery EA: замок + усреднение + частичный TP."
 #property description "Управляет существующей корзиной + панель ручных кнопок BUY/SELL/CLOSE."
@@ -59,6 +59,7 @@ input ENUM_LOG_LEVEL InpLogLevel         = LOG_INFO;   // уровень лог�
 input group "=== Ручная панель ==="
 input bool   InpShowManualPanel          = true;       // показывать кнопки на графике
 input double InpManualLot                = 0.01;       // лот для ручных BUY/SELL
+input int    InpPanelOriginY             = 80;         // отступ панели от низа графика (пикс.)
 
 //+------------------------------------------------------------------+
 //|  Глобальные объекты                                               |
@@ -94,6 +95,8 @@ bool ValidateInputs()
      { Print("InpBasketTPMoney должен быть > 0"); return false; }
    if(InpManualLot <= 0.0)
      { Print("InpManualLot должен быть > 0"); return false; }
+   if(InpPanelOriginY < 0)
+     { Print("InpPanelOriginY должен быть >= 0"); return false; }
    return true;
   }
 
@@ -136,17 +139,29 @@ int OnInit()
       return INIT_FAILED;
      }
 
-   // Панель ручного управления
+   // Панель ручного управления — пропускаем в режиме оптимизации
+   // (объекты графика там не имеют смысла и только засоряют логи).
+   bool in_optimization = (bool)MQLInfoInteger(MQL_OPTIMIZATION);
+   bool show_panel = InpShowManualPanel && !in_optimization;
+
    g_panel.Init(InpManualLot,
+                InpPanelOriginY,
                 GetPointer(g_ops),
                 GetPointer(g_basket),
                 GetPointer(g_log));
-   if(InpShowManualPanel)
+   if(show_panel)
       g_panel.Show();
 
-   g_log.Info(StringFormat("AWRocov v0.11 запущен на %s magic=%I64u panel=%s",
+   // В тестере без визуального режима кнопки бесполезны — подскажем пользователю
+   if((bool)MQLInfoInteger(MQL_TESTER) && !(bool)MQLInfoInteger(MQL_VISUAL_MODE)
+      && InpShowManualPanel && !in_optimization)
+     {
+      g_log.Warn("тестер БЕЗ визуального режима — кнопки панели не будут реагировать на клики");
+     }
+
+   g_log.Info(StringFormat("AWRocov v0.12 запущен на %s magic=%I64u panel=%s",
                            _Symbol, InpMagic,
-                           InpShowManualPanel ? "да" : "нет"));
+                           show_panel ? "да" : "нет"));
    return INIT_SUCCEEDED;
   }
 
@@ -167,6 +182,12 @@ void OnChartEvent(const int       id,
   {
    if(id != CHARTEVENT_OBJECT_CLICK)
       return;
+
+   // Видимый лог: всегда сообщаем о приходе клика, чтобы можно было
+   // понять, что событие реально доходит до EA. Если ничего не пишется —
+   // значит CHARTEVENT_OBJECT_CLICK не приходит (тестер без Visual Mode,
+   // график неактивен и т.п.).
+   g_log.Info("OnChartEvent клик по объекту: " + sparam);
 
    if(g_panel.OnClick(sparam))
      {
@@ -192,7 +213,7 @@ void UpdateStatusComment()
   {
    const SBasketStats st = g_basket.Stats();
    string s = StringFormat(
-      "AWRocov v0.11 | %s | magic=%I64u\n"
+      "AWRocov v0.12 | %s | magic=%I64u\n"
       "состояние: %-18s   направление: %+d   замок: %s\n"
       "корзина: BUY %d (%.2f лот @ %.5f) | SELL %d (%.2f лот @ %.5f)\n"
       "плавающий PnL: %.2f   усреднений: %d/%d",
