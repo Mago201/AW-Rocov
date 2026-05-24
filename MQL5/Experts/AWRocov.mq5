@@ -10,9 +10,10 @@
 //+------------------------------------------------------------------+
 #property copyright "AW-Rocov"
 #property link      "https://github.com/Mago201/AW-Rocov"
-#property version   "0.10"
+#property version   "0.11"
 #property strict
-#property description "Чистый recovery EA: замок + усреднение + частичный TP."
+#property description "Чистый recovery EA: замок + усреднение + частичный TP + BE-охота."
+#property description "Поддерживает гармоническую и линейную схемы лота, помимо классического мартингейла."
 #property description "Управляет существующей корзиной; своих сигналов на вход не подаёт."
 
 #include <AWRocov/Logger.mqh>
@@ -36,9 +37,11 @@ input bool   InpUseHedgeLock             = true;       // требует hedging
 input double InpLockVolumeMultiplier     = 1.0;        // объём замка = |нетто| × множитель
 
 input group "=== Сетка усреднения ==="
+input ENUM_AVG_LOT_SCHEME InpAveragingLotScheme = AVG_LOT_GEOMETRIC; // схема роста объёма
 input int    InpAveragingStepPoints      = 300;        // шаг сетки (пункты)
-input double InpAveragingLotMultiplier   = 1.5;        // каждый следующий = предыдущий × множитель
-input int    InpMaxAveragingOrders       = 8;          // потолок числа усреднений
+input double InpAveragingLotMultiplier   = 1.5;        // множитель (только GEOMETRIC)
+input double InpAveragingLotIncrement    = 0.5;        // приращение k для LINEAR: L_n = L_base*(1+n*k)
+input int    InpMaxAveragingOrders       = 8;          // потолок числа усреднений (0 = без усреднений, сразу ПОИСК_BE)
 
 input group "=== Частичное закрытие ==="
 input double InpPartialClosePct          = 50.0;       // % закрытия (1..100)
@@ -46,6 +49,12 @@ input int    InpPartialCloseProfitPoints = 200;        // прибыль поз�
 
 input group "=== Выход из корзины ==="
 input double InpBasketTPMoney            = 10.0;       // прибыль корзины для полного закрытия (валюта счёта)
+
+input group "=== BE-охота (поиск безубытка) ==="
+input bool   InpUseBEHunt                = true;       // переключаться в ПОИСК_BE по достижении потолка усреднений
+input int    InpBEHuntStuckSeconds       = 1800;       // секунд без прогресса до forced partial close (0 = выкл)
+input double InpBEHuntPartialClosePct    = 25.0;       // % закрытия худшей позиции в режиме BE
+input int    InpBEHuntMinProgressPoints  = 30;         // улучшение в пунктах, считающееся «прогрессом»
 
 input group "=== Торговля ==="
 input ulong  InpDeviationPoints          = 20;         // допустимое проскальзывание (пункты)
@@ -74,6 +83,8 @@ bool ValidateInputs()
      { Print("InpAveragingStepPoints должен быть > 0"); return false; }
    if(InpAveragingLotMultiplier <= 0.0)
      { Print("InpAveragingLotMultiplier должен быть > 0"); return false; }
+   if(InpAveragingLotIncrement < 0.0)
+     { Print("InpAveragingLotIncrement должен быть >= 0"); return false; }
    if(InpMaxAveragingOrders < 0)
      { Print("InpMaxAveragingOrders должен быть >= 0"); return false; }
    if(InpPartialClosePct <= 0.0 || InpPartialClosePct > 100.0)
@@ -82,6 +93,16 @@ bool ValidateInputs()
      { Print("InpPartialCloseProfitPoints должен быть > 0"); return false; }
    if(InpBasketTPMoney <= 0.0)
      { Print("InpBasketTPMoney должен быть > 0"); return false; }
+   if(InpBEHuntStuckSeconds < 0)
+     { Print("InpBEHuntStuckSeconds должен быть >= 0"); return false; }
+   if(InpBEHuntPartialClosePct <= 0.0 || InpBEHuntPartialClosePct > 100.0)
+     { Print("InpBEHuntPartialClosePct должен быть в (0..100]"); return false; }
+   if(InpBEHuntMinProgressPoints < 0)
+     { Print("InpBEHuntMinProgressPoints должен быть >= 0"); return false; }
+   // Если усреднения отключены потолком 0, BE-охота должна быть включена,
+   // иначе после ЛОКИРОВАНИЯ движок зависнет в УСРЕДНЕНИИ ничего не делая.
+   if(InpMaxAveragingOrders == 0 && !InpUseBEHunt)
+     { Print("InpMaxAveragingOrders=0 требует включённой BE-охоты"); return false; }
    return true;
   }
 
@@ -108,12 +129,18 @@ int OnInit()
    cfg.loss_threshold_money        = InpLossThresholdMoney;
    cfg.use_hedge_lock              = InpUseHedgeLock;
    cfg.lock_volume_multiplier      = InpLockVolumeMultiplier;
+   cfg.avg_lot_scheme              = InpAveragingLotScheme;
    cfg.averaging_step_points       = InpAveragingStepPoints;
    cfg.averaging_lot_multiplier    = InpAveragingLotMultiplier;
+   cfg.averaging_lot_increment     = InpAveragingLotIncrement;
    cfg.max_averaging_orders        = InpMaxAveragingOrders;
    cfg.partial_close_pct           = InpPartialClosePct;
    cfg.partial_close_profit_points = InpPartialCloseProfitPoints;
    cfg.basket_tp_money             = InpBasketTPMoney;
+   cfg.use_be_hunt                 = InpUseBEHunt;
+   cfg.be_hunt_stuck_seconds       = InpBEHuntStuckSeconds;
+   cfg.be_hunt_partial_pct         = InpBEHuntPartialClosePct;
+   cfg.be_hunt_min_progress_points = InpBEHuntMinProgressPoints;
 
    if(!g_engine.Init(_Symbol, cfg,
                      GetPointer(g_log),
@@ -124,7 +151,7 @@ int OnInit()
       return INIT_FAILED;
      }
 
-   g_log.Info(StringFormat("AWRocov v0.10 запущен на %s magic=%I64u",
+   g_log.Info(StringFormat("AWRocov v0.11 запущен на %s magic=%I64u",
                            _Symbol, InpMagic));
    return INIT_SUCCEEDED;
   }
@@ -150,18 +177,40 @@ void OnTick()
 void UpdateStatusComment()
   {
    const SBasketStats st = g_basket.Stats();
+   double be       = g_basket.BreakEvenPrice();
+   double dist_pts = g_basket.DistanceToBreakEvenPoints();
+
+   string be_line;
+   if(be > 0.0)
+      be_line = StringFormat("BE: %.5f   расстояние: %.0f пт", be, dist_pts);
+   else
+      be_line = "BE: — (V_net=0, корзина в полном замке)";
+
+   string be_hunt_line = "";
+   if(g_engine.BEHuntActive())
+     {
+      datetime prog = g_engine.BEHuntProgressAt();
+      int idle = (prog > 0) ? (int)(TimeCurrent() - prog) : 0;
+      be_hunt_line = StringFormat(
+         "\nBE-охота: forced_close=%d   простой=%d сек   лучшая дист=%.0f пт",
+         g_engine.BEHuntPartials(), idle, g_engine.BEHuntBestDist());
+     }
+
    string s = StringFormat(
-      "AWRocov v0.10 | %s | magic=%I64u\n"
-      "состояние: %-18s   направление: %+d   замок: %s\n"
+      "AWRocov v0.11 | %s | magic=%I64u\n"
+      "состояние: %-15s   направление: %+d   замок: %s   схема: %s\n"
       "корзина: BUY %d (%.2f лот @ %.5f) | SELL %d (%.2f лот @ %.5f)\n"
-      "плавающий PnL: %.2f   усреднений: %d/%d",
+      "плавающий PnL: %.2f   усреднений: %d/%d\n"
+      "%s%s",
       _Symbol, InpMagic,
       g_engine.StateString(), g_engine.RecoveryDir(),
       g_engine.LockOpened() ? "да" : "нет",
+      g_engine.SchemeString(),
       st.buy_count,  st.buy_volume,  st.buy_avg_price,
       st.sell_count, st.sell_volume, st.sell_avg_price,
       st.floating_pnl,
-      g_engine.AveragingCount(), InpMaxAveragingOrders);
+      g_engine.AveragingCount(), InpMaxAveragingOrders,
+      be_line, be_hunt_line);
    Comment(s);
   }
 //+------------------------------------------------------------------+
