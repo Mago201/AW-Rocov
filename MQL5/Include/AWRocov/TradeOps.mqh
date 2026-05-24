@@ -77,12 +77,33 @@ public:
                                 const double          volume,
                                 const string          comment)
      {
+      // Pre-flight проверки — чем раньше отвалимся с понятной причиной,
+      // тем меньше времени уходит на гадание «почему не открывает».
+      if(!(bool)TerminalInfoInteger(TERMINAL_TRADE_ALLOWED))
+        {
+         if(m_log) m_log.Error("OpenMarket: торговля запрещена в терминале (AutoTrading выключен или нет прав)");
+         return 0;
+        }
+      if(!(bool)MQLInfoInteger(MQL_TRADE_ALLOWED))
+        {
+         if(m_log) m_log.Error("OpenMarket: торговля запрещена для этого советника (галка 'Allow Algo Trading' в свойствах EA)");
+         return 0;
+        }
+      if(!(bool)AccountInfoInteger(ACCOUNT_TRADE_ALLOWED))
+        {
+         if(m_log) m_log.Error("OpenMarket: торговля запрещена для этого счёта");
+         return 0;
+        }
+
       double v = NormalizeVolume(volume);
       if(v <= 0.0)
         {
          if(m_log) m_log.Warn("OpenMarket: нормализованный объём = 0");
          return 0;
         }
+
+      // Освежим котировки прямо перед отправкой
+      m_sym.RefreshRates();
 
       bool ok = false;
       if(type == ORDER_TYPE_BUY)
@@ -98,12 +119,26 @@ public:
       if(!ok)
         {
          if(m_log)
-            m_log.Error(StringFormat("OpenMarket не удался retcode=%u err=%d",
-                                     m_trade.ResultRetcode(),
-                                     GetLastError()));
+            m_log.Error(StringFormat(
+               "OpenMarket не удался: retcode=%u (%s) err=%d, "
+               "symbol=%s lot=%.2f bid=%.5f ask=%.5f free_margin=%.2f",
+               m_trade.ResultRetcode(),
+               m_trade.ResultRetcodeDescription(),
+               GetLastError(),
+               m_symbol, v,
+               m_sym.Bid(), m_sym.Ask(),
+               AccountInfoDouble(ACCOUNT_MARGIN_FREE)));
          return 0;
         }
-      return m_trade.ResultOrder();
+
+      // Сделка прошла, но мог быть deal без позиции (редкий случай).
+      ulong order_id = m_trade.ResultOrder();
+      if(m_log)
+         m_log.Info(StringFormat("OpenMarket OK: order=%I64u retcode=%u (%s)",
+                                 order_id,
+                                 m_trade.ResultRetcode(),
+                                 m_trade.ResultRetcodeDescription()));
+      return order_id;
      }
 
    //--- Полное закрытие позиции по тикету

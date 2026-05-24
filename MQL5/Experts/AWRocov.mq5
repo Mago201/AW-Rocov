@@ -70,6 +70,12 @@ CTradeOps        g_ops;
 CRecoveryEngine  g_engine;
 CManualPanel     g_panel;
 
+// Диагностика: счётчик и описание последнего клика, чтобы видеть его
+// прямо на графике без зависимости от настроек журнала.
+int      g_click_counter   = 0;
+string   g_last_click_name  = "(нет)";
+datetime g_last_click_time  = 0;
+
 //+------------------------------------------------------------------+
 //|  Валидация параметров                                             |
 //+------------------------------------------------------------------+
@@ -183,10 +189,16 @@ void OnChartEvent(const int       id,
    if(id != CHARTEVENT_OBJECT_CLICK)
       return;
 
-   // Видимый лог: всегда сообщаем о приходе клика, чтобы можно было
-   // понять, что событие реально доходит до EA. Если ничего не пишется —
-   // значит CHARTEVENT_OBJECT_CLICK не приходит (тестер без Visual Mode,
-   // график неактивен и т.п.).
+   // Голый Print() — попадает в журнал НЕЗАВИСИМО от уровня логирования.
+   // Если этой строки в журнале нет — клик до EA не доходит вообще.
+   PrintFormat("[AWRocov] *** CLICK *** sparam=%s lparam=%I64d", sparam, lparam);
+
+   // Счётчик и метка для статусной плашки на графике
+   g_click_counter++;
+   g_last_click_name = sparam;
+   g_last_click_time = TimeCurrent();
+
+   // То же через логгер (если уровень >= INFO)
    g_log.Info("OnChartEvent клик по объекту: " + sparam);
 
    if(g_panel.OnClick(sparam))
@@ -216,14 +228,17 @@ void UpdateStatusComment()
       "AWRocov v0.12 | %s | magic=%I64u\n"
       "состояние: %-18s   направление: %+d   замок: %s\n"
       "корзина: BUY %d (%.2f лот @ %.5f) | SELL %d (%.2f лот @ %.5f)\n"
-      "плавающий PnL: %.2f   усреднений: %d/%d",
+      "плавающий PnL: %.2f   усреднений: %d/%d\n"
+      "кликов получено: %d   последний: %s @ %s",
       _Symbol, InpMagic,
       g_engine.StateString(), g_engine.RecoveryDir(),
       g_engine.LockOpened() ? "да" : "нет",
       st.buy_count,  st.buy_volume,  st.buy_avg_price,
       st.sell_count, st.sell_volume, st.sell_avg_price,
       st.floating_pnl,
-      g_engine.AveragingCount(), InpMaxAveragingOrders);
+      g_engine.AveragingCount(), InpMaxAveragingOrders,
+      g_click_counter, g_last_click_name,
+      g_last_click_time == 0 ? "—" : TimeToString(g_last_click_time, TIME_SECONDS));
    Comment(s);
   }
 //+------------------------------------------------------------------+
