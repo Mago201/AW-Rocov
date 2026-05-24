@@ -334,6 +334,23 @@ public:
    void              Tick()
      {
       m_basket.Refresh();
+
+      // Защитный сброс: если корзина опустела (например, через ручную
+      // кнопку CLOSE или внешним вмешательством) во время цикла —
+      // вернуться в ОЖИДАНИЕ, не пытаясь усреднять пустоту.
+      if(m_basket.IsEmpty() && m_state != REC_IDLE)
+        {
+         if(m_log != NULL)
+            m_log.Info("корзина опустела вне цикла закрытия — сброс в ОЖИДАНИЕ");
+         m_recovery_dir    = 0;
+         m_last_avg_price  = 0.0;
+         m_last_avg_volume = 0.0;
+         m_avg_count       = 0;
+         m_lock_done       = false;
+         Transition(REC_IDLE);
+         return;
+        }
+
       switch(m_state)
         {
          case REC_IDLE:            OnIdle();            break;

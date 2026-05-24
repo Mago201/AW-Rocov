@@ -4,21 +4,26 @@
 //|                                                                   |
 //|  Ядро стратегии: замок убыточной корзины + сетка усреднения       |
 //|  + частичный TP. Этот EA НЕ генерирует входные сигналы. Он        |
-//|  управляет уже существующими позициями (открытыми вручную или     |
+//|  управляет уже существующими позициями (открытыми вручную или    |
 //|  другими EA с тем же magic) и пытается вернуть корзину к          |
 //|  небольшой плановой прибыли.                                      |
+//|                                                                   |
+//|  Также есть простая панель ручного управления (BUY/SELL/CLOSE),  |
+//|  чтобы открывать тестовые позиции прямо в Strategy Tester или    |
+//|  на живом счёте.                                                  |
 //+------------------------------------------------------------------+
 #property copyright "AW-Rocov"
 #property link      "https://github.com/Mago201/AW-Rocov"
-#property version   "0.10"
+#property version   "0.11"
 #property strict
 #property description "Чистый recovery EA: замок + усреднение + частичный TP."
-#property description "Управляет существующей корзиной; своих сигналов на вход не подаёт."
+#property description "Управляет существующей корзиной + панель ручных кнопок BUY/SELL/CLOSE."
 
 #include <AWRocov/Logger.mqh>
 #include <AWRocov/BasketManager.mqh>
 #include <AWRocov/TradeOps.mqh>
 #include <AWRocov/RecoveryEngine.mqh>
+#include <AWRocov/Panel.mqh>
 
 //+------------------------------------------------------------------+
 //|  Параметры                                                        |
@@ -51,6 +56,10 @@ input group "=== Торговля ==="
 input ulong  InpDeviationPoints          = 20;         // допустимое проскальзывание (пункты)
 input ENUM_LOG_LEVEL InpLogLevel         = LOG_INFO;   // уровень логов: ОТЛ/ИНФ/ПРЕ/ОШБ
 
+input group "=== Ручная панель ==="
+input bool   InpShowManualPanel          = true;       // показывать кнопки на графике
+input double InpManualLot                = 0.01;       // лот для ручных BUY/SELL
+
 //+------------------------------------------------------------------+
 //|  Глобальные объекты                                               |
 //+------------------------------------------------------------------+
@@ -58,6 +67,7 @@ CLogger          g_log;
 CBasketManager   g_basket;
 CTradeOps        g_ops;
 CRecoveryEngine  g_engine;
+CManualPanel     g_panel;
 
 //+------------------------------------------------------------------+
 //|  Валидация параметров                                             |
@@ -82,6 +92,8 @@ bool ValidateInputs()
      { Print("InpPartialCloseProfitPoints должен быть > 0"); return false; }
    if(InpBasketTPMoney <= 0.0)
      { Print("InpBasketTPMoney должен быть > 0"); return false; }
+   if(InpManualLot <= 0.0)
+     { Print("InpManualLot должен быть > 0"); return false; }
    return true;
   }
 
@@ -124,15 +136,44 @@ int OnInit()
       return INIT_FAILED;
      }
 
-   g_log.Info(StringFormat("AWRocov v0.10 запущен на %s magic=%I64u",
-                           _Symbol, InpMagic));
+   // Панель ручного управления
+   g_panel.Init(InpManualLot,
+                GetPointer(g_ops),
+                GetPointer(g_basket),
+                GetPointer(g_log));
+   if(InpShowManualPanel)
+      g_panel.Show();
+
+   g_log.Info(StringFormat("AWRocov v0.11 запущен на %s magic=%I64u panel=%s",
+                           _Symbol, InpMagic,
+                           InpShowManualPanel ? "да" : "нет"));
    return INIT_SUCCEEDED;
   }
 
 void OnDeinit(const int reason)
   {
+   g_panel.Destroy();
    Comment("");
    g_log.Info(StringFormat("деинициализация причина=%d", reason));
+  }
+
+//+------------------------------------------------------------------+
+//|  События графика — клики по кнопкам                               |
+//+------------------------------------------------------------------+
+void OnChartEvent(const int       id,
+                  const long     &lparam,
+                  const double   &dparam,
+                  const string   &sparam)
+  {
+   if(id != CHARTEVENT_OBJECT_CLICK)
+      return;
+
+   if(g_panel.OnClick(sparam))
+     {
+      // Кнопка визуально остаётся "нажатой" — снимаем состояние
+      ObjectSetInteger(0, sparam, OBJPROP_STATE, false);
+      ChartRedraw(0);
+     }
   }
 
 //+------------------------------------------------------------------+
@@ -151,7 +192,7 @@ void UpdateStatusComment()
   {
    const SBasketStats st = g_basket.Stats();
    string s = StringFormat(
-      "AWRocov v0.10 | %s | magic=%I64u\n"
+      "AWRocov v0.11 | %s | magic=%I64u\n"
       "состояние: %-18s   направление: %+d   замок: %s\n"
       "корзина: BUY %d (%.2f лот @ %.5f) | SELL %d (%.2f лот @ %.5f)\n"
       "плавающий PnL: %.2f   усреднений: %d/%d",
