@@ -183,6 +183,9 @@ void OnDeinit(const int reason)
 //+------------------------------------------------------------------+
 void OnTick()
   {
+   // Опрос кнопок панели (нужно для визуального тестера, где
+   // OnChartEvent не доставляется). На реале опрос безвреден.
+   g_panel.Poll();
    g_engine.Tick();
    UpdateStatusComment();
   }

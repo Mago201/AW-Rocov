@@ -153,56 +153,74 @@ public:
         }
      }
 
-   //--- Делегат для OnChartEvent. Возвращает true, если событие
-   //    относилось к панели (даже если действие не удалось).
+   //--- Действия (общий код для OnChartEvent и Poll-ветки).
+   void              DoBuy()
+     {
+      ObjectSetInteger(m_chart_id, m_btn_buy, OBJPROP_STATE, false);
+      ulong t = m_ops.OpenMarket(ORDER_TYPE_BUY, m_lot, "AWRocov:manual_buy");
+      if(m_log)
+         m_log.Info(StringFormat("ручной BUY %.2f лот -> ticket=%I64u",
+                                 m_lot, t));
+      ChartRedraw(m_chart_id);
+     }
+
+   void              DoSell()
+     {
+      ObjectSetInteger(m_chart_id, m_btn_sell, OBJPROP_STATE, false);
+      ulong t = m_ops.OpenMarket(ORDER_TYPE_SELL, m_lot, "AWRocov:manual_sell");
+      if(m_log)
+         m_log.Info(StringFormat("ручной SELL %.2f лот -> ticket=%I64u",
+                                 m_lot, t));
+      ChartRedraw(m_chart_id);
+     }
+
+   void              DoCloseAll()
+     {
+      ObjectSetInteger(m_chart_id, m_btn_close, OBJPROP_STATE, false);
+      m_basket.Refresh();
+      int n      = m_basket.TicketsCount();
+      int closed = 0;
+      for(int i = 0; i < n; i++)
+        {
+         ulong t = m_basket.TicketAt(i);
+         if(m_ops.ClosePosition(t)) closed++;
+        }
+      if(m_log)
+         m_log.Info(StringFormat("ручное закрытие всех: %d/%d закрыто",
+                                 closed, n));
+      ChartRedraw(m_chart_id);
+     }
+
+   //--- Делегат для OnChartEvent (реал/демо). Возвращает true, если
+   //    событие относилось к панели.
    bool              OnEvent(const int       id,
                              const long     &lparam,
                              const double   &dparam,
                              const string   &sparam)
      {
       if(id != CHARTEVENT_OBJECT_CLICK) return false;
-
-      if(sparam == m_btn_buy)
-        {
-         ObjectSetInteger(m_chart_id, m_btn_buy, OBJPROP_STATE, false);
-         ulong t = m_ops.OpenMarket(ORDER_TYPE_BUY, m_lot, "AWRocov:manual_buy");
-         if(m_log)
-            m_log.Info(StringFormat("ручной BUY %.2f лот -> ticket=%I64u",
-                                    m_lot, t));
-         ChartRedraw(m_chart_id);
-         return true;
-        }
-
-      if(sparam == m_btn_sell)
-        {
-         ObjectSetInteger(m_chart_id, m_btn_sell, OBJPROP_STATE, false);
-         ulong t = m_ops.OpenMarket(ORDER_TYPE_SELL, m_lot, "AWRocov:manual_sell");
-         if(m_log)
-            m_log.Info(StringFormat("ручной SELL %.2f лот -> ticket=%I64u",
-                                    m_lot, t));
-         ChartRedraw(m_chart_id);
-         return true;
-        }
-
-      if(sparam == m_btn_close)
-        {
-         ObjectSetInteger(m_chart_id, m_btn_close, OBJPROP_STATE, false);
-         m_basket.Refresh();
-         int n      = m_basket.TicketsCount();
-         int closed = 0;
-         for(int i = 0; i < n; i++)
-           {
-            ulong t = m_basket.TicketAt(i);
-            if(m_ops.ClosePosition(t)) closed++;
-           }
-         if(m_log)
-            m_log.Info(StringFormat("ручное закрытие всех: %d/%d закрыто",
-                                    closed, n));
-         ChartRedraw(m_chart_id);
-         return true;
-        }
-
+      if(sparam == m_btn_buy)   { DoBuy();      return true; }
+      if(sparam == m_btn_sell)  { DoSell();     return true; }
+      if(sparam == m_btn_close) { DoCloseAll(); return true; }
       return false;
+     }
+
+   //--- Опрос состояния кнопок по таймеру/тику. Нужен для визуального
+   //    тестера: там OnChartEvent НЕ доставляется, но клик всё равно
+   //    переключает OBJPROP_STATE кнопки в true. На реале опрос
+   //    безвреден — OnEvent уже сбросил state, цикл ничего не находит.
+   //    Возвращает true, если хоть одно действие выполнено.
+   bool              Poll()
+     {
+      if(!m_visible) return false;
+      bool fired = false;
+      if(ObjectGetInteger(m_chart_id, m_btn_buy, OBJPROP_STATE))
+        { DoBuy();      fired = true; }
+      if(ObjectGetInteger(m_chart_id, m_btn_sell, OBJPROP_STATE))
+        { DoSell();     fired = true; }
+      if(ObjectGetInteger(m_chart_id, m_btn_close, OBJPROP_STATE))
+        { DoCloseAll(); fired = true; }
+      return fired;
      }
   };
 
