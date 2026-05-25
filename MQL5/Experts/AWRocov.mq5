@@ -67,6 +67,7 @@ input int    InpTestPanelCorner          = CORNER_RIGHT_UPPER;  // угол гр
 input int    InpTestPanelOffsetX         = 10;                  // отступ от угла, px
 input int    InpTestPanelOffsetY         = 30;                  // отступ от угла, px
 input double InpTestSmallLot             = 0.01;                // лот кнопок «BUY/SELL малый»
+input double InpTestMidLot               = 0.05;                // лот кнопок «BUY/SELL средний»
 input double InpTestBigLot               = 0.10;                // лот кнопок «BUY/SELL крупный»
 
 //+------------------------------------------------------------------+
@@ -113,6 +114,13 @@ bool ValidateInputs()
    // иначе после ЛОКИРОВАНИЯ движок зависнет в УСРЕДНЕНИИ ничего не делая.
    if(InpMaxAveragingOrders == 0 && !InpUseBEHunt)
      { Print("InpMaxAveragingOrders=0 требует включённой BE-охоты"); return false; }
+   // Лоты тестовой панели: только проверка положительности и «здравого
+   // смысла» порядка. Сравнение с реальными SymbolInfo-ограничениями
+   // делается уже в TradeOps::NormalizeVolume на момент открытия.
+   if(InpTestSmallLot <= 0.0 || InpTestMidLot <= 0.0 || InpTestBigLot <= 0.0)
+     { Print("Лоты тестовой панели должны быть > 0"); return false; }
+   if(InpTestSmallLot > InpTestMidLot || InpTestMidLot > InpTestBigLot)
+     { Print("Лоты должны идти по возрастанию: Small <= Mid <= Big"); return false; }
    return true;
   }
 
@@ -229,6 +237,8 @@ void OnChartEvent(const int      id,
       // решается уже автоматом или ручными командами.
       case PANEL_BTN_BUY_SMALL:  TestOpen(ORDER_TYPE_BUY,  InpTestSmallLot); break;
       case PANEL_BTN_SELL_SMALL: TestOpen(ORDER_TYPE_SELL, InpTestSmallLot); break;
+      case PANEL_BTN_BUY_MID:    TestOpen(ORDER_TYPE_BUY,  InpTestMidLot);   break;
+      case PANEL_BTN_SELL_MID:   TestOpen(ORDER_TYPE_SELL, InpTestMidLot);   break;
       case PANEL_BTN_BUY_BIG:    TestOpen(ORDER_TYPE_BUY,  InpTestBigLot);   break;
       case PANEL_BTN_SELL_BIG:   TestOpen(ORDER_TYPE_SELL, InpTestBigLot);   break;
 

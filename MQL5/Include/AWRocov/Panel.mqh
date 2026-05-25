@@ -3,7 +3,7 @@
 //|  Тестовая панель для ручного управления EA в Strategy Tester.     |
 //|                                                                   |
 //|  Отвечает только за две вещи:                                     |
-//|     1) рисует сетку 3×3 кликабельных OBJ_BUTTON;                  |
+//|     1) рисует сетку 4×3 кликабельных OBJ_BUTTON;                  |
 //|     2) на CHARTEVENT_OBJECT_CLICK резолвит имя объекта в          |
 //|        ENUM_PANEL_BUTTON и снимает «нажатое» состояние кнопки.    |
 //|                                                                   |
@@ -20,16 +20,23 @@
 enum ENUM_PANEL_BUTTON
   {
    PANEL_BTN_NONE          = 0,   // не наша кнопка / не нажатие
-   PANEL_BTN_BUY_SMALL     = 1,   // BUY 0.01
-   PANEL_BTN_SELL_SMALL    = 2,   // SELL 0.01
-   PANEL_BTN_BUY_BIG       = 3,   // BUY 0.10
-   PANEL_BTN_SELL_BIG      = 4,   // SELL 0.10
-   PANEL_BTN_CLOSE_ALL     = 5,   // ✖ ЗАКР.
-   PANEL_BTN_RESET         = 6,   // × СБРОС
-   PANEL_BTN_PAUSE_TOGGLE  = 7,   // ⏸ ПАУЗА / ▶ ВОЗОБН.
-   PANEL_BTN_FORCE_TRIGGER = 8,   // ⚡ ТРИГГЕР
-   PANEL_BTN_FORCE_BE_HUNT = 9    // → BE-HUNT
+   PANEL_BTN_BUY_SMALL     = 1,   // BUY  малый  лот
+   PANEL_BTN_SELL_SMALL    = 2,   // SELL малый  лот
+   PANEL_BTN_BUY_MID       = 3,   // BUY  средний лот
+   PANEL_BTN_SELL_MID      = 4,   // SELL средний лот
+   PANEL_BTN_BUY_BIG       = 5,   // BUY  крупный лот
+   PANEL_BTN_SELL_BIG      = 6,   // SELL крупный лот
+   PANEL_BTN_CLOSE_ALL     = 7,   // ✖ ЗАКР.
+   PANEL_BTN_RESET         = 8,   // × СБРОС
+   PANEL_BTN_PAUSE_TOGGLE  = 9,   // ⏸ ПАУЗА / ▶ ВОЗОБН.
+   PANEL_BTN_FORCE_TRIGGER = 10,  // ⚡ ТРИГГЕР
+   PANEL_BTN_FORCE_BE_HUNT = 11   // → BE-HUNT
   };
+
+// Геометрия сетки кнопок. Захардкожено как константы класса, потому что
+// при изменении они рассыпают и UI, и mirror-логику для правых якорей.
+#define AWROCOV_PANEL_COLS 3
+#define AWROCOV_PANEL_ROWS 4
 
 class CTestPanel
   {
@@ -60,14 +67,19 @@ private:
                                   const color   fg = clrWhite)
      {
       int x, y;
+      // Mirror columns when anchor is on the right side of the chart so
+      // that "column 0" stays on the visual left of the panel itself.
+      // Same for rows when anchor is at the bottom. Using
+      // AWROCOV_PANEL_COLS/ROWS makes the math future-proof if we ever
+      // change the grid size.
       if(m_corner == CORNER_LEFT_UPPER || m_corner == CORNER_LEFT_LOWER)
          x = m_origin_x + col * (m_btn_w + m_gap);
       else
-         x = m_origin_x + (2 - col) * (m_btn_w + m_gap); // зеркалим столбцы для правых углов
+         x = m_origin_x + (AWROCOV_PANEL_COLS - 1 - col) * (m_btn_w + m_gap);
       if(m_corner == CORNER_LEFT_UPPER || m_corner == CORNER_RIGHT_UPPER)
          y = m_origin_y + row * (m_btn_h + m_gap);
       else
-         y = m_origin_y + (2 - row) * (m_btn_h + m_gap);
+         y = m_origin_y + (AWROCOV_PANEL_ROWS - 1 - row) * (m_btn_h + m_gap);
 
       if(!ObjectCreate(m_chart_id, name, OBJ_BUTTON, 0, 0, 0))
         {
@@ -122,7 +134,7 @@ public:
       m_origin_y = origin_y;
      }
 
-   //--- Создать все 9 кнопок. Если уже создано — пересоздаём,
+   //--- Создать все 11 кнопок. Если уже создано — пересоздаём,
    //    чтобы пережить смену параметров через input.
    bool              Create()
      {
@@ -137,24 +149,33 @@ public:
       //   оранжевое — закрытие
       //   синее     — сброс
       //   бирюза    — переход в BE-охоту
+      //
+      // Раскладка 4×3 (последняя клетка нижнего ряда оставлена пустой):
+      //   row0: BUY-S  SELL-S  PAUSE
+      //   row1: BUY-M  SELL-M  TRIGGER
+      //   row2: BUY-B  SELL-B  BE-HUNT
+      //   row3: CLOSE  RESET   (—)
       bool ok = true;
-      ok &= CreateButton(BtnName("buy_small"),     "BUY 0.01",   0, 0, clrSeaGreen);
-      ok &= CreateButton(BtnName("sell_small"),    "SELL 0.01",  1, 0, clrFireBrick);
-      ok &= CreateButton(BtnName("pause"),         "ПАУЗА",      2, 0, clrMediumPurple);
+      ok &= CreateButton(BtnName("buy_small"),     "BUY малый",   0, 0, clrSeaGreen);
+      ok &= CreateButton(BtnName("sell_small"),    "SELL малый",  1, 0, clrFireBrick);
+      ok &= CreateButton(BtnName("pause"),         "ПАУЗА",       2, 0, clrMediumPurple);
 
-      ok &= CreateButton(BtnName("buy_big"),       "BUY 0.10",   0, 1, clrSeaGreen);
-      ok &= CreateButton(BtnName("sell_big"),      "SELL 0.10",  1, 1, clrFireBrick);
-      ok &= CreateButton(BtnName("force_trigger"), "ТРИГГЕР",    2, 1, clrGoldenrod);
+      ok &= CreateButton(BtnName("buy_mid"),       "BUY средн.",  0, 1, clrSeaGreen);
+      ok &= CreateButton(BtnName("sell_mid"),      "SELL средн.", 1, 1, clrFireBrick);
+      ok &= CreateButton(BtnName("force_trigger"), "ТРИГГЕР",     2, 1, clrGoldenrod);
 
-      ok &= CreateButton(BtnName("close_all"),     "ЗАКР. ВСЁ",  0, 2, clrDarkOrange);
-      ok &= CreateButton(BtnName("reset"),         "СБРОС",      1, 2, clrSteelBlue);
-      ok &= CreateButton(BtnName("force_be_hunt"), "ПОИСК BE",   2, 2, clrTeal);
+      ok &= CreateButton(BtnName("buy_big"),       "BUY крупн.",  0, 2, clrSeaGreen);
+      ok &= CreateButton(BtnName("sell_big"),      "SELL крупн.", 1, 2, clrFireBrick);
+      ok &= CreateButton(BtnName("force_be_hunt"), "ПОИСК BE",    2, 2, clrTeal);
+
+      ok &= CreateButton(BtnName("close_all"),     "ЗАКР. ВСЁ",   0, 3, clrDarkOrange);
+      ok &= CreateButton(BtnName("reset"),         "СБРОС",       1, 3, clrSteelBlue);
 
       ChartRedraw(m_chart_id);
       m_created = ok;
       if(m_log)
         {
-         if(ok) m_log.Info("Panel: 9 кнопок создано");
+         if(ok) m_log.Info("Panel: 11 кнопок создано");
          else   m_log.Error("Panel: создание кнопок частично не удалось");
         }
       return ok;
@@ -200,6 +221,8 @@ public:
       string suffix = StringSubstr(sparam, StringLen(m_prefix));
       if(suffix == "buy_small")     return PANEL_BTN_BUY_SMALL;
       if(suffix == "sell_small")    return PANEL_BTN_SELL_SMALL;
+      if(suffix == "buy_mid")       return PANEL_BTN_BUY_MID;
+      if(suffix == "sell_mid")      return PANEL_BTN_SELL_MID;
       if(suffix == "buy_big")       return PANEL_BTN_BUY_BIG;
       if(suffix == "sell_big")      return PANEL_BTN_SELL_BIG;
       if(suffix == "close_all")     return PANEL_BTN_CLOSE_ALL;
