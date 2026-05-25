@@ -20,6 +20,7 @@
 #include <AWRocov/BasketManager.mqh>
 #include <AWRocov/TradeOps.mqh>
 #include <AWRocov/RecoveryEngine.mqh>
+#include <AWRocov/Panel.mqh>
 
 //+------------------------------------------------------------------+
 //|  Параметры                                                        |
@@ -60,6 +61,10 @@ input group "=== Торговля ==="
 input ulong  InpDeviationPoints          = 20;         // допустимое проскальзывание (пункты)
 input ENUM_LOG_LEVEL InpLogLevel         = LOG_INFO;   // уровень логов: ОТЛ/ИНФ/ПРЕ/ОШБ
 
+input group "=== Панель ==="
+input bool   InpShowPanel                = true;       // показывать кнопки BUY/SELL/CLOSE ALL
+input double InpManualLotSize            = 0.01;       // размер лота для ручного открытия
+
 //+------------------------------------------------------------------+
 //|  Глобальные объекты                                               |
 //+------------------------------------------------------------------+
@@ -67,6 +72,7 @@ CLogger          g_log;
 CBasketManager   g_basket;
 CTradeOps        g_ops;
 CRecoveryEngine  g_engine;
+CPanel           g_panel;
 
 //+------------------------------------------------------------------+
 //|  Валидация параметров                                             |
@@ -103,6 +109,8 @@ bool ValidateInputs()
    // иначе после ЛОКИРОВАНИЯ движок зависнет в УСРЕДНЕНИИ ничего не делая.
    if(InpMaxAveragingOrders == 0 && !InpUseBEHunt)
      { Print("InpMaxAveragingOrders=0 требует включённой BE-охоты"); return false; }
+   if(InpManualLotSize <= 0.0)
+     { Print("InpManualLotSize должен быть > 0"); return false; }
    return true;
   }
 
@@ -151,6 +159,13 @@ int OnInit()
       return INIT_FAILED;
      }
 
+   g_panel.Init("AWRocov", InpManualLotSize,
+                GetPointer(g_log),
+                GetPointer(g_basket),
+                GetPointer(g_ops));
+   if(InpShowPanel)
+      g_panel.Show();
+
    g_log.Info(StringFormat("AWRocov v0.11 запущен на %s magic=%I64u",
                            _Symbol, InpMagic));
    return INIT_SUCCEEDED;
@@ -158,6 +173,7 @@ int OnInit()
 
 void OnDeinit(const int reason)
   {
+   g_panel.Hide();
    Comment("");
    g_log.Info(StringFormat("деинициализация причина=%d", reason));
   }
@@ -169,6 +185,18 @@ void OnTick()
   {
    g_engine.Tick();
    UpdateStatusComment();
+  }
+
+//+------------------------------------------------------------------+
+//|  События графика — клики по кнопкам панели                        |
+//+------------------------------------------------------------------+
+void OnChartEvent(const int    id,
+                  const long   &lparam,
+                  const double &dparam,
+                  const string &sparam)
+  {
+   if(g_panel.OnEvent(id, lparam, dparam, sparam))
+      UpdateStatusComment();
   }
 
 //+------------------------------------------------------------------+
