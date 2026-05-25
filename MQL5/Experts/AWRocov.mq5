@@ -20,6 +20,7 @@
 #include <AWRocov/BasketManager.mqh>
 #include <AWRocov/TradeOps.mqh>
 #include <AWRocov/RecoveryEngine.mqh>
+#include <AWRocov/Panel.mqh>
 
 //+------------------------------------------------------------------+
 //|  Параметры                                                        |
@@ -60,6 +61,14 @@ input group "=== Торговля ==="
 input ulong  InpDeviationPoints          = 20;         // допустимое проскальзывание (пункты)
 input ENUM_LOG_LEVEL InpLogLevel         = LOG_INFO;   // уровень логов: ОТЛ/ИНФ/ПРЕ/ОШБ
 
+input group "=== Тестовая панель (для Strategy Tester / визуального режима) ==="
+input bool   InpShowTestPanel            = true;                // показывать панель кнопок
+input int    InpTestPanelCorner          = CORNER_RIGHT_UPPER;  // угол графика (CORNER_*)
+input int    InpTestPanelOffsetX         = 10;                  // отступ от угла, px
+input int    InpTestPanelOffsetY         = 30;                  // отступ от угла, px
+input double InpTestSmallLot             = 0.01;                // лот кнопок «BUY/SELL малый»
+input double InpTestBigLot               = 0.10;                // лот кнопок «BUY/SELL крупный»
+
 //+------------------------------------------------------------------+
 //|  Глобальные объекты                                               |
 //+------------------------------------------------------------------+
@@ -67,6 +76,7 @@ CLogger          g_log;
 CBasketManager   g_basket;
 CTradeOps        g_ops;
 CRecoveryEngine  g_engine;
+CTestPanel       g_panel;
 
 //+------------------------------------------------------------------+
 //|  Валидация параметров                                             |
@@ -151,6 +161,19 @@ int OnInit()
       return INIT_FAILED;
      }
 
+   // Тестовая панель (только для визуального режима тестера / графика).
+   // На headless-прогонах ObjectCreate просто создаст объекты, которые
+   // никто не увидит и которые не повлияют на торговлю — это нормально.
+   if(InpShowTestPanel)
+     {
+      g_panel.Init(ChartID(), "AWRocov_btn_",
+                   GetPointer(g_log),
+                   InpTestPanelCorner,
+                   InpTestPanelOffsetX,
+                   InpTestPanelOffsetY);
+      g_panel.Create();
+     }
+
    g_log.Info(StringFormat("AWRocov v0.11 запущен на %s magic=%I64u",
                            _Symbol, InpMagic));
    return INIT_SUCCEEDED;
@@ -158,6 +181,7 @@ int OnInit()
 
 void OnDeinit(const int reason)
   {
+   g_panel.Destroy();
    Comment("");
    g_log.Info(StringFormat("деинициализация причина=%d", reason));
   }
@@ -168,6 +192,63 @@ void OnDeinit(const int reason)
 void OnTick()
   {
    g_engine.Tick();
+   UpdateStatusComment();
+  }
+
+//+------------------------------------------------------------------+
+//|  Открыть тестовую позицию по нажатию кнопки                       |
+//+------------------------------------------------------------------+
+void TestOpen(const ENUM_ORDER_TYPE side, const double lot)
+  {
+   ulong t = g_ops.OpenMarket(side, lot, "AWRocov:test");
+   if(t == 0)
+      g_log.Error(StringFormat("тест-открытие не удалось side=%s lot=%.2f",
+                               side == ORDER_TYPE_BUY ? "BUY" : "SELL", lot));
+   else
+      g_log.Info(StringFormat("тест-открытие ok ticket=%I64u side=%s lot=%.2f",
+                              t, side == ORDER_TYPE_BUY ? "BUY" : "SELL", lot));
+  }
+
+//+------------------------------------------------------------------+
+//|  Обработчик кнопок панели                                         |
+//|  Маршрутизирует CHARTEVENT_OBJECT_CLICK через g_panel.OnEvent()   |
+//|  и вызывает либо движок, либо g_ops для тестового открытия.       |
+//+------------------------------------------------------------------+
+void OnChartEvent(const int      id,
+                  const long    &lparam,
+                  const double  &dparam,
+                  const string  &sparam)
+  {
+   ENUM_PANEL_BUTTON btn = g_panel.OnEvent(id, lparam, dparam, sparam);
+   switch(btn)
+     {
+      case PANEL_BTN_NONE: return;
+
+      // Тестовые позиции открываются мимо движка — это «фикстуры»
+      // для подготовки сценария. Дальнейшая судьба этой корзины
+      // решается уже автоматом или ручными командами.
+      case PANEL_BTN_BUY_SMALL:  TestOpen(ORDER_TYPE_BUY,  InpTestSmallLot); break;
+      case PANEL_BTN_SELL_SMALL: TestOpen(ORDER_TYPE_SELL, InpTestSmallLot); break;
+      case PANEL_BTN_BUY_BIG:    TestOpen(ORDER_TYPE_BUY,  InpTestBigLot);   break;
+      case PANEL_BTN_SELL_BIG:   TestOpen(ORDER_TYPE_SELL, InpTestBigLot);   break;
+
+      // Команды движку — взводим request-флаг, реальный переход
+      // произойдёт в начале следующего Tick().
+      case PANEL_BTN_CLOSE_ALL:     g_engine.RequestCloseAll();     break;
+      case PANEL_BTN_RESET:         g_engine.RequestReset();        break;
+      case PANEL_BTN_FORCE_TRIGGER: g_engine.RequestForceTrigger(); break;
+      case PANEL_BTN_FORCE_BE_HUNT: g_engine.RequestForceBEHunt();  break;
+
+      // Пауза — единственная команда, обрабатываемая мгновенно;
+      // подпись кнопки тоже меняется сразу, чтобы оператор видел
+      // фактическое состояние без ожидания тика.
+      case PANEL_BTN_PAUSE_TOGGLE:
+         g_engine.TogglePause();
+         g_panel.SetPauseCaption(g_engine.IsPaused());
+         g_log.Info(g_engine.IsPaused() ? "ПАУЗА вкл" : "ПАУЗА выкл");
+         break;
+     }
+   ChartRedraw();
    UpdateStatusComment();
   }
 
@@ -197,12 +278,13 @@ void UpdateStatusComment()
      }
 
    string s = StringFormat(
-      "AWRocov v0.11 | %s | magic=%I64u\n"
+      "AWRocov v0.11 | %s | magic=%I64u%s\n"
       "состояние: %-15s   направление: %+d   замок: %s   схема: %s\n"
       "корзина: BUY %d (%.2f лот @ %.5f) | SELL %d (%.2f лот @ %.5f)\n"
       "плавающий PnL: %.2f   усреднений: %d/%d\n"
       "%s%s",
       _Symbol, InpMagic,
+      g_engine.IsPaused() ? "   [ПАУЗА]" : "",
       g_engine.StateString(), g_engine.RecoveryDir(),
       g_engine.LockOpened() ? "да" : "нет",
       g_engine.SchemeString(),

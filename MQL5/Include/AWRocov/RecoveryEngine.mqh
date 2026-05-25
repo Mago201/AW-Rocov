@@ -108,6 +108,17 @@ private:
    double                m_be_hunt_best_dist_pts;  // лучшее (минимальное) расстояние до BE, пункты
    int                   m_be_hunt_partial_count;  // сколько forced partial close сделали
 
+   //--- Управление снаружи (используется тестовой панелью).
+   //    Кнопки только взводят флаги; реальные переходы происходят
+   //    в начале Tick() — это держит автомат однопоточным
+   //    относительно собственной логики и облегчает отладку
+   //    в Strategy Tester.
+   bool                  m_paused;            // движок «заморожен», состояние не меняется
+   bool                  m_req_close_all;     // принудительно закрыть всю корзину
+   bool                  m_req_reset;         // сбросить контекст, вернуться в ОЖИДАНИЕ (без закрытия)
+   bool                  m_req_force_trigger; // активироваться, минуя порог убытка
+   bool                  m_req_force_be_hunt; // принудительно перейти в ПОИСК_BE
+
    //--- Вспомогательное -------------------------------------------
    string                StateName(ENUM_RECOVERY_STATE s) const
      {
@@ -536,7 +547,12 @@ public:
                                         m_be_hunt_started_at(0),
                                         m_be_hunt_progress_at(0),
                                         m_be_hunt_best_dist_pts(0.0),
-                                        m_be_hunt_partial_count(0) {}
+                                        m_be_hunt_partial_count(0),
+                                        m_paused(false),
+                                        m_req_close_all(false),
+                                        m_req_reset(false),
+                                        m_req_force_trigger(false),
+                                        m_req_force_be_hunt(false) {}
 
    bool              Init(const string symbol,
                           const SRecoveryConfig &cfg,
@@ -569,7 +585,49 @@ public:
 
    void              Tick()
      {
+      // 1) Снапшот корзины обновляем всегда — даже на паузе и при
+      //    обработке запросов. Comment() и расчёт BE должны быть
+      //    актуальны независимо от состояния автомата.
       m_basket.Refresh();
+
+      // 2) Запросы извне обрабатываются ДО штатного обработчика.
+      //    Один клик кнопки = один атомарный переход. Следующий
+      //    тик уже отработает в новом состоянии (например,
+      //    REC_CLOSING_ALL подхватит OnClosingAll на следующем заходе).
+      if(m_req_close_all)
+        {
+         m_req_close_all = false;
+         if(m_log) m_log.Info("запрос: ЗАКРЫТЬ ВСЁ");
+         Transition(REC_CLOSING_ALL);
+         return;
+        }
+      if(m_req_reset)
+        {
+         m_req_reset = false;
+         if(m_log) m_log.Info("запрос: СБРОС цикла (без закрытия позиций)");
+         ResetRecoveryContext();
+         Transition(REC_IDLE);
+         return;
+        }
+      if(m_req_force_trigger)
+        {
+         m_req_force_trigger = false;
+         ForceActivate();
+         return;
+        }
+      if(m_req_force_be_hunt)
+        {
+         m_req_force_be_hunt = false;
+         ForceBEHunt();
+         return;
+        }
+
+      // 3) На паузе движок ничего не делает (но Refresh уже произошёл,
+      //    так что Comment() и BE остаются актуальными).
+      if(m_paused)
+         return;
+
+      // 4) Штатный обработчик состояния.
       switch(m_state)
         {
          case REC_IDLE:            OnIdle();            break;
@@ -580,6 +638,21 @@ public:
          case REC_BE_HUNT:         OnBEHunt();          break;
         }
      }
+
+   //--- Внешнее управление (используется тестовой панелью) -------
+   //    Все методы только взводят флаги; реальная работа
+   //    происходит в Tick(). Это сделано, чтобы избежать
+   //    «полу-переходов» из обработчика OnChartEvent.
+
+   void              Pause()                 { m_paused = true; }
+   void              Resume()                { m_paused = false; }
+   void              TogglePause()           { m_paused = !m_paused; }
+   bool              IsPaused() const        { return m_paused; }
+
+   void              RequestCloseAll()       { m_req_close_all     = true; }
+   void              RequestReset()          { m_req_reset         = true; }
+   void              RequestForceTrigger()   { m_req_force_trigger = true; }
+   void              RequestForceBEHunt()    { m_req_force_be_hunt = true; }
 
    //--- Для Comment() / внешнего статуса --------------------------
    ENUM_RECOVERY_STATE State()           const { return m_state; }
@@ -593,6 +666,98 @@ public:
    datetime            BEHuntStartedAt() const { return m_be_hunt_started_at; }
    datetime            BEHuntProgressAt() const { return m_be_hunt_progress_at; }
    double              BEHuntBestDist() const { return m_be_hunt_best_dist_pts; }
+
+private:
+   //--- Принудительная активация цикла, минуя порог убытка.
+   //    Используется кнопкой ⚡ ТРИГГЕР в тестовой панели.
+   //    Если корзина не пуста и не сбалансирована, входим в
+   //    REC_LOCKING с обычным контекстом восстановления.
+   void              ForceActivate()
+     {
+      if(m_basket.IsEmpty())
+        {
+         if(m_log) m_log.Warn("ФОРС ТРИГГЕР: корзина пуста; пропуск");
+         return;
+        }
+      int dir = m_basket.NetDirection();
+      if(dir == 0)
+        {
+         if(m_log) m_log.Warn("ФОРС ТРИГГЕР: корзина сбалансирована; пропуск");
+         return;
+        }
+
+      m_recovery_dir    = dir;
+      m_avg_count       = 0;
+      m_lock_done       = false;
+      m_last_avg_price  = (dir > 0)
+                          ? m_basket.Stats().buy_avg_price
+                          : m_basket.Stats().sell_avg_price;
+      double base_vol   = (dir > 0)
+                          ? m_basket.Stats().buy_volume
+                          : m_basket.Stats().sell_volume;
+      m_last_avg_volume = base_vol;
+      m_base_volume     = base_vol;
+
+      m_be_hunt_started_at    = 0;
+      m_be_hunt_progress_at   = 0;
+      m_be_hunt_best_dist_pts = 0.0;
+      m_be_hunt_partial_count = 0;
+
+      if(m_log)
+         m_log.Info(StringFormat(
+            "ФОРС ТРИГГЕР: направление=%d базовый_лот=%.2f схема=%s",
+            dir, base_vol, SchemeName(m_cfg.avg_lot_scheme)));
+      Transition(REC_LOCKING);
+     }
+
+   //--- Принудительный переход в ПОИСК_BE.
+   //    Если цикл ещё не запущен (m_recovery_dir == 0), мы
+   //    поднимаем минимальный контекст самостоятельно (без
+   //    LOCKING — открытие новых ордеров здесь нежелательно).
+   //    Если корзина в идеальном замке (V_net=0), всё равно
+   //    переходим в BE_HUNT — там предусмотрен forced close.
+   void              ForceBEHunt()
+     {
+      if(m_basket.IsEmpty())
+        {
+         if(m_log) m_log.Warn("ФОРС BE-HUNT: корзина пуста; пропуск");
+         return;
+        }
+
+      if(m_recovery_dir == 0)
+        {
+         int dir = m_basket.NetDirection();
+         if(dir == 0)
+           {
+            // V_net = 0: BE не определён, но OnBEHunt сразу
+            // сделает forced close. Условно ставим dir = +1,
+            // чтобы поля контекста были непустыми.
+            dir = 1;
+            if(m_log)
+               m_log.Warn("ФОРС BE-HUNT: V_net=0, контекст условный, "
+                          "будет forced close худшей позиции");
+           }
+         m_recovery_dir    = dir;
+         m_avg_count       = 0;
+         m_lock_done       = true;
+         m_last_avg_price  = (dir > 0)
+                             ? m_basket.Stats().buy_avg_price
+                             : m_basket.Stats().sell_avg_price;
+         double base_vol   = (dir > 0)
+                             ? m_basket.Stats().buy_volume
+                             : m_basket.Stats().sell_volume;
+         m_last_avg_volume = base_vol;
+         m_base_volume     = base_vol;
+        }
+
+      // Сбрасываем трекер прогресса под новый «вход» в режим.
+      m_be_hunt_started_at    = 0;
+      m_be_hunt_progress_at   = 0;
+      m_be_hunt_best_dist_pts = 0.0;
+
+      if(m_log) m_log.Info("ФОРС BE-HUNT");
+      Transition(REC_BE_HUNT);
+     }
   };
 
 #endif // __AWROCOV_RECOVERYENGINE_MQH__
