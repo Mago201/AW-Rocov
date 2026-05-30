@@ -134,6 +134,63 @@ public:
                                   ticket, m_trade.ResultRetcode()));
       return ok;
      }
+
+   //--- Открыть рыночный ордер с заданными SL/TP (для скальпера).
+   //    sl_price / tp_price == 0.0 означает «без уровня».
+   //    Возвращает тикет ордера или 0 при ошибке.
+   ulong             OpenMarketSLTP(const ENUM_ORDER_TYPE type,
+                                    const double          volume,
+                                    const double          sl_price,
+                                    const double          tp_price,
+                                    const string          comment)
+     {
+      double v = NormalizeVolume(volume);
+      if(v <= 0.0)
+        {
+         if(m_log) m_log.Warn("OpenMarketSLTP: нормализованный объём = 0");
+         return 0;
+        }
+      double sl = (sl_price > 0.0) ? NormalizePrice(sl_price) : 0.0;
+      double tp = (tp_price > 0.0) ? NormalizePrice(tp_price) : 0.0;
+
+      bool ok = false;
+      if(type == ORDER_TYPE_BUY)
+         ok = m_trade.Buy(v, m_symbol, 0.0, sl, tp, comment);
+      else if(type == ORDER_TYPE_SELL)
+         ok = m_trade.Sell(v, m_symbol, 0.0, sl, tp, comment);
+      else
+        {
+         if(m_log) m_log.Error("OpenMarketSLTP: неподдерживаемый тип ордера");
+         return 0;
+        }
+
+      if(!ok)
+        {
+         if(m_log)
+            m_log.Error(StringFormat("OpenMarketSLTP не удался retcode=%u err=%d",
+                                     m_trade.ResultRetcode(),
+                                     GetLastError()));
+         return 0;
+        }
+      return m_trade.ResultOrder();
+     }
+
+   //--- Изменить SL/TP открытой позиции (используется трейлингом).
+   //    Значение 0.0 снимает соответствующий уровень.
+   bool              ModifyPositionSLTP(const ulong  ticket,
+                                        const double sl_price,
+                                        const double tp_price)
+     {
+      if(!PositionSelectByTicket(ticket))
+         return false;
+      double sl = (sl_price > 0.0) ? NormalizePrice(sl_price) : 0.0;
+      double tp = (tp_price > 0.0) ? NormalizePrice(tp_price) : 0.0;
+      bool ok = m_trade.PositionModify(ticket, sl, tp);
+      if(!ok && m_log)
+         m_log.Error(StringFormat("ModifyPositionSLTP не удался ticket=%I64u retcode=%u",
+                                  ticket, m_trade.ResultRetcode()));
+      return ok;
+     }
   };
 
 #endif // __AWROCOV_TRADEOPS_MQH__
