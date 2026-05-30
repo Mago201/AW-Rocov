@@ -77,6 +77,15 @@ input int    InpSessionEndHour    = 21;     // конец окна (час; == s
 input group "=== Предохранители ==="
 input double InpMaxDrawdownStopPct = 30.0;  // просадка эквити (%) -> закрыть всё и встать (0 = выкл)
 
+input group "=== Усреднение (мартингейл-сетка) ==="
+input bool   InpUseAveraging      = false;  // ВКЛ режим усреднения (вместо 1 позиции со SL/TP)
+input bool   InpGridStepUseATR    = false;  // шаг сетки по ATR (иначе фикс. пункты)
+input int    InpGridStepPoints    = 300;    // шаг сетки (пункты) при выключенном ATR
+input double InpGridStepAtrMult   = 1.5;    // множитель ATR для шага сетки
+input int    InpMaxAveragingOrders = 10;    // макс. ордеров в корзине
+input double InpBasketTpMoney     = 0.0;    // профит корзины в валюте счёта (>0 => приоритет)
+input int    InpBasketTpPoints    = 100;    // профит корзины (пункты от средней), если money=0
+
 input group "=== Торговля / логи ==="
 input ulong  InpDeviationPoints   = 30;          // допустимое проскальзывание (пункты)
 input ENUM_LOG_LEVEL InpLogLevel  = LOG_INFO;    // уровень логов: ОТЛ/ИНФ/ПРЕ/ОШБ
@@ -134,6 +143,20 @@ bool ValidateInputs()
      { Print("Часы сессии должны быть в [0..23]"); return false; }
    if(InpMaxDrawdownStopPct < 0.0 || InpMaxDrawdownStopPct >= 100.0)
      { Print("InpMaxDrawdownStopPct должен быть в [0..100)"); return false; }
+
+   if(InpUseAveraging)
+     {
+      if(InpGridStepUseATR && InpGridStepAtrMult <= 0.0)
+        { Print("InpGridStepAtrMult должен быть > 0"); return false; }
+      if(!InpGridStepUseATR && InpGridStepPoints <= 0)
+        { Print("InpGridStepPoints должен быть > 0"); return false; }
+      if(InpMaxAveragingOrders < 1)
+        { Print("InpMaxAveragingOrders должен быть >= 1"); return false; }
+      if(InpBasketTpMoney <= 0.0 && InpBasketTpPoints <= 0)
+        { Print("Задайте профит-таргет корзины: InpBasketTpMoney или InpBasketTpPoints"); return false; }
+      if(InpUseTrailing)
+         Print("ПРЕДУПРЕЖДЕНИЕ: трейлинг игнорируется в режиме усреднения (выход всей корзиной)");
+     }
    return true;
   }
 
@@ -191,6 +214,14 @@ int OnInit()
    cfg.session_end_hour   = InpSessionEndHour;
    cfg.max_dd_stop_pct    = InpMaxDrawdownStopPct;
 
+   cfg.use_averaging      = InpUseAveraging;
+   cfg.grid_step_use_atr  = InpGridStepUseATR;
+   cfg.grid_step_points   = InpGridStepPoints;
+   cfg.grid_step_atr_mult = InpGridStepAtrMult;
+   cfg.max_avg_orders     = InpMaxAveragingOrders;
+   cfg.basket_tp_money    = InpBasketTpMoney;
+   cfg.basket_tp_points   = InpBasketTpPoints;
+
    if(!g_engine.Init(_Symbol, InpTimeframe, InpMagic, cfg,
                      GetPointer(g_log),
                      GetPointer(g_ops),
@@ -238,15 +269,33 @@ void UpdateStatusComment()
                       ? "\n*** АВАРИЙНЫЙ СТОП: торговля остановлена по просадке ***"
                       : "";
 
+   string mode_line;
+   if(g_engine.IsAveraging())
+     {
+      int    bdir = g_engine.BasketDir();
+      string bdir_s = (bdir > 0) ? "BUY" : (bdir < 0 ? "SELL" : "—");
+      mode_line = StringFormat(
+         "режим: УСРЕДНЕНИЕ   корзина: %s ордеров=%d   PnL=%.2f\n"
+         "след. лот долива=%.2f   схема=%s",
+         bdir_s, g_engine.AvgOrders(), g_engine.BasketPnL(),
+         g_engine.NextLot(), g_engine.SchemeString());
+     }
+   else
+     {
+      mode_line = StringFormat(
+         "режим: последовательный   мартин: шаг=%d   след. лот=%.2f   схема=%s",
+         g_engine.MartStep(), g_engine.NextLot(), g_engine.SchemeString());
+     }
+
    string s = StringFormat(
       "AWScalper v0.1 | %s %s | magic=%I64u\n"
       "тренд: %s   RSI: %.1f   спред: %d пт\n"
-      "мартин: шаг=%d   след. лот=%.2f   схема=%s\n"
+      "%s\n"
       "сделок: открыто=%d закрыто=%d   W/L=%d/%d   винрейт=%.1f%%\n"
       "последний результат: %.2f   пик эквити: %.2f%s",
       _Symbol, EnumToString(InpTimeframe), InpMagic,
       trend_s, rsi, (int)spread,
-      g_engine.MartStep(), g_engine.NextLot(), g_engine.SchemeString(),
+      mode_line,
       g_engine.TradesOpened(), closed,
       g_engine.Wins(), g_engine.Losses(), winrate,
       g_engine.LastRealized(), g_engine.EquityPeak(),

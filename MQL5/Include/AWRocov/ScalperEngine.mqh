@@ -31,6 +31,7 @@
 #include "Logger.mqh"
 #include "TradeOps.mqh"
 #include "SignalEngine.mqh"
+#include "BasketManager.mqh"
 
 //--- Схема роста объёма по номеру шага мартингейла.
 enum ENUM_MART_SCHEME
@@ -74,6 +75,19 @@ struct SScalperConfig
 
    //--- Аварийный стоп
    double            max_dd_stop_pct;     // просадка эквити (%) -> закрыть всё и встать (0 = выкл)
+
+   //--- Усреднение (мартингейл-сетка) ------------------------------
+   //    Когда use_averaging = true, движок работает НЕ как
+   //    «1 позиция со SL/TP», а как корзина: цена идёт против —
+   //    доливаем ордер той же стороны, лот растёт по ЧИСЛУ ордеров
+   //    (LotForStep(номер_ордера)), выходим всей корзиной в плюс.
+   bool              use_averaging;       // включить режим усреднения
+   bool              grid_step_use_atr;   // шаг сетки в ATR (иначе фикс. пункты)
+   int               grid_step_points;    // шаг сетки (пункты) при grid_step_use_atr=false
+   double            grid_step_atr_mult;  // множитель ATR для шага сетки
+   int               max_avg_orders;      // макс. число ордеров в корзине
+   double            basket_tp_money;     // профит корзины в валюте счёта для закрытия (>0 => приоритет)
+   int               basket_tp_points;    // профит корзины (пункты от средней) для закрытия (если money=0)
   };
 
 class CScalperEngine
@@ -102,6 +116,12 @@ private:
    int               m_wins;
    int               m_losses;
    double            m_last_realized;
+
+   //--- Состояние корзины (режим усреднения) ------------------------
+   CBasketManager    m_basket;            // снапшот корзины
+   int               m_basket_dir;        // направление корзины: +1 BUY / -1 SELL / 0 нет
+   double            m_last_add_price;    // цена последнего открытого ордера корзины
+   datetime          m_basket_open_time;  // время открытия первого ордера корзины
 
    //--- Найти свою позицию по символу+magic (0, если нет). ----------
    ulong             FindOwnPosition() const
@@ -358,6 +378,173 @@ private:
         }
      }
 
+   //--- Шаг сетки усреднения в пунктах (ATR или фикс). --------------
+   double            AveragingStepPoints()
+     {
+      if(m_cfg.grid_step_use_atr)
+        {
+         double atr_pts = m_signal.GetATRPoints();
+         return atr_pts * m_cfg.grid_step_atr_mult;
+        }
+      return (double)m_cfg.grid_step_points;
+     }
+
+   //--- Открыть ПЕРВЫЙ ордер корзины усреднения (без индивидуальных
+   //    SL/TP — выходим всей корзиной). dir: +1 BUY / -1 SELL. -------
+   void              OpenFirstAveraging(int dir)
+     {
+      double lot = LotForStep(0);
+      ENUM_ORDER_TYPE type = (dir > 0) ? ORDER_TYPE_BUY : ORDER_TYPE_SELL;
+      ulong order = m_ops.OpenMarket(type, lot, "AWScalper-avg");
+      if(order == 0)
+        {
+         if(m_log) m_log.Error("OpenFirstAveraging: не удалось открыть первый ордер");
+         return;
+        }
+      m_basket_dir       = dir;
+      m_basket_open_time = TimeCurrent();
+      m_last_add_price   = (dir > 0) ? m_ops.Ask() : m_ops.Bid();
+      m_had_position     = true;
+      m_trades_opened++;
+      if(m_log)
+         m_log.Info(StringFormat("корзина: первый ордер %s лот=%.2f @%.5f",
+                                 (dir > 0) ? "BUY" : "SELL", lot, m_last_add_price));
+     }
+
+   //--- Долить ордер в корзину. order_index = текущее число ордеров. -
+   void              AddAveragingOrder(int dir, int order_index)
+     {
+      double lot = LotForStep(order_index);
+      ENUM_ORDER_TYPE type = (dir > 0) ? ORDER_TYPE_BUY : ORDER_TYPE_SELL;
+      ulong order = m_ops.OpenMarket(type, lot, "AWScalper-avg");
+      if(order == 0)
+        {
+         if(m_log) m_log.Error("AddAveragingOrder: не удалось долить ордер");
+         return;
+        }
+      m_last_add_price = (dir > 0) ? m_ops.Ask() : m_ops.Bid();
+      m_trades_opened++;
+      if(m_log)
+         m_log.Info(StringFormat("корзина: долив #%d %s лот=%.2f @%.5f (ордеров=%d)",
+                                 order_index, (dir > 0) ? "BUY" : "SELL",
+                                 lot, m_last_add_price, order_index + 1));
+     }
+
+   //--- Управление открытой корзиной: проверка профит-таргета и долив.
+   void              ManageAveragingBasket()
+     {
+      SBasketStats st = m_basket.Stats();
+      double point = m_ops.Point();
+      if(point <= 0.0) return;
+
+      int dir = (m_basket_dir != 0) ? m_basket_dir : m_basket.NetDirection();
+      if(dir == 0) return;
+
+      // --- 1) Профит-таргет корзины -> закрыть всё. ---
+      bool do_exit = false;
+      if(m_cfg.basket_tp_money > 0.0)
+        {
+         if(m_basket.FloatingPnL() >= m_cfg.basket_tp_money) do_exit = true;
+        }
+      else
+        {
+         double tp_dist = m_cfg.basket_tp_points * point;
+         if(dir > 0)
+           {
+            double avg = st.buy_avg_price;
+            if(avg > 0.0 && m_ops.Bid() >= avg + tp_dist) do_exit = true;
+           }
+         else
+           {
+            double avg = st.sell_avg_price;
+            if(avg > 0.0 && m_ops.Ask() <= avg - tp_dist) do_exit = true;
+           }
+        }
+
+      if(do_exit)
+        {
+         if(m_log)
+            m_log.Info(StringFormat("корзина: цель достигнута (PnL=%.2f) -> закрываю всё",
+                                    m_basket.FloatingPnL()));
+         CloseAllOwn();
+         return;
+        }
+
+      // --- 2) Долив при движении против на шаг сетки. ---
+      int count = m_basket.TotalCount();
+      if(count >= m_cfg.max_avg_orders) return;   // потолок корзины
+
+      double step_pts = AveragingStepPoints();
+      if(step_pts <= 0.0) return;
+      double step_price = step_pts * point;
+
+      if(dir > 0)
+        {
+         double bid = m_ops.Bid();
+         if(m_last_add_price - bid >= step_price)
+            AddAveragingOrder(dir, count);
+        }
+      else
+        {
+         double ask = m_ops.Ask();
+         if(ask - m_last_add_price >= step_price)
+            AddAveragingOrder(dir, count);
+        }
+     }
+
+   //--- Обработка закрытия всей корзины (режим усреднения). ----------
+   void              OnBasketClosed(double realized)
+     {
+      m_last_realized = realized;
+      m_trades_closed++;
+      if(realized >= 0.0) m_wins++;
+      else                m_losses++;
+      m_basket_dir     = 0;
+      m_last_add_price = 0.0;
+      if(m_log)
+         m_log.Info(StringFormat("корзина закрыта, итог=%.2f", realized));
+     }
+
+   //--- Тик в режиме усреднения. ------------------------------------
+   void              TickAveraging()
+     {
+      m_basket.Refresh();
+      bool have = (m_basket.TotalCount() > 0);
+
+      // Детект закрытия корзины.
+      if(m_had_position && !have)
+        {
+         double realized = RealizedSince(m_basket_open_time);
+         OnBasketClosed(realized);
+        }
+      m_had_position = have;
+
+      // Корзина открыта — управляем (таргет/долив).
+      if(have)
+        {
+         ManageAveragingBasket();
+         return;
+        }
+
+      // Корзина пуста — ищем точку входа под первый ордер.
+      datetime bar_time = iTime(m_symbol, m_tf, 0);
+      if(m_cfg.one_trade_per_bar)
+        {
+         if(bar_time == m_last_bar_time) return;
+         m_last_bar_time = bar_time;
+        }
+      if(!InSession(TimeCurrent())) return;
+
+      long spread = SymbolInfoInteger(m_symbol, SYMBOL_SPREAD);
+      if(m_cfg.max_spread_points > 0 && spread > m_cfg.max_spread_points)
+         return;
+
+      int sig = m_signal.GetSignal();
+      if(sig == 0) return;
+
+      OpenFirstAveraging(sig);
+     }
+
 public:
                      CScalperEngine(): m_log(NULL), m_ops(NULL), m_signal(NULL),
                                        m_magic(0),
@@ -366,7 +553,9 @@ public:
                                        m_last_bar_time(0), m_halted(false),
                                        m_equity_peak(0.0),
                                        m_trades_opened(0), m_trades_closed(0),
-                                       m_wins(0), m_losses(0), m_last_realized(0.0) {}
+                                       m_wins(0), m_losses(0), m_last_realized(0.0),
+                                       m_basket_dir(0), m_last_add_price(0.0),
+                                       m_basket_open_time(0) {}
 
    bool              Init(const string          symbol,
                           const ENUM_TIMEFRAMES  tf,
@@ -389,21 +578,49 @@ public:
       m_equity_peak  = AccountInfoDouble(ACCOUNT_EQUITY);
       m_last_bar_time = iTime(symbol, tf, 0);
 
+      // Корзина усреднения.
+      m_basket.Init(symbol, magic, true, logger);
+
       // Если на старте уже есть своя позиция — учитываем её, чтобы не
       // открыть вторую и корректно поймать её закрытие.
-      ulong t = FindOwnPosition();
-      m_had_position = (t != 0);
-      if(m_had_position)
+      if(m_cfg.use_averaging)
         {
-         m_cur_ticket     = t;
-         m_last_open_time = (datetime)PositionGetInteger(POSITION_TIME);
+         m_basket.Refresh();
+         m_had_position = (m_basket.TotalCount() > 0);
+         if(m_had_position)
+           {
+            m_basket_dir       = m_basket.NetDirection();
+            m_basket_open_time = m_basket.Stats().last_open_time;
+            m_last_add_price   = (m_basket_dir > 0) ? m_ops.Ask() : m_ops.Bid();
+           }
+        }
+      else
+        {
+         ulong t = FindOwnPosition();
+         m_had_position = (t != 0);
+         if(m_had_position)
+           {
+            m_cur_ticket     = t;
+            m_last_open_time = (datetime)PositionGetInteger(POSITION_TIME);
+           }
         }
 
       if(m_log)
          m_log.Info(StringFormat(
-            "ScalperEngine: base_lot=%.2f схема=%s max_steps=%d max_lot=%.2f DD-стоп=%.1f%%",
+            "ScalperEngine: режим=%s base_lot=%.2f схема=%s max_steps=%d max_lot=%.2f DD-стоп=%.1f%%",
+            m_cfg.use_averaging ? "УСРЕДНЕНИЕ" : "последовательный",
             cfg.base_lot, SchemeName(cfg.mart_scheme), cfg.max_mart_steps,
             cfg.max_lot, cfg.max_dd_stop_pct));
+      if(m_log != NULL && m_cfg.use_averaging)
+         m_log.Info(StringFormat(
+            "усреднение: шаг=%s макс_ордеров=%d таргет=%s",
+            m_cfg.grid_step_use_atr
+               ? StringFormat("ATR×%.2f", m_cfg.grid_step_atr_mult)
+               : StringFormat("%dпт", m_cfg.grid_step_points),
+            m_cfg.max_avg_orders,
+            m_cfg.basket_tp_money > 0.0
+               ? StringFormat("%.2f валюты", m_cfg.basket_tp_money)
+               : StringFormat("%dпт от средней", m_cfg.basket_tp_points)));
       return true;
      }
 
@@ -413,7 +630,14 @@ public:
       CheckDrawdownStop();
       if(m_halted) return;
 
-      // 2) Детект закрытия позиции.
+      // 2) Режим усреднения обрабатывается отдельной веткой.
+      if(m_cfg.use_averaging)
+        {
+         TickAveraging();
+         return;
+        }
+
+      // 3) Детект закрытия позиции.
       ulong t = FindOwnPosition();
       bool have = (t != 0);
       if(have) m_cur_ticket = t;
@@ -488,8 +712,18 @@ public:
    int               Wins()          const { return m_wins; }
    int               Losses()        const { return m_losses; }
    double            LastRealized()  const { return m_last_realized; }
-   double            NextLot()       const { return LotForStep(m_mart_step); }
    string            SchemeString()  const { return SchemeName(m_cfg.mart_scheme); }
+
+   //--- В режиме усреднения «шаг» = число ордеров в корзине.
+   bool              IsAveraging()   const { return m_cfg.use_averaging; }
+   int               AvgOrders()     const { return m_basket.TotalCount(); }
+   int               BasketDir()     const { return m_basket_dir; }
+   double            BasketPnL()     const { return m_basket.FloatingPnL(); }
+   double            NextLot()       const
+     {
+      if(m_cfg.use_averaging) return LotForStep(m_basket.TotalCount());
+      return LotForStep(m_mart_step);
+     }
   };
 
 #endif // __AWROCOV_SCALPERENGINE_MQH__
