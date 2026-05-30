@@ -52,6 +52,14 @@ struct SScalperConfig
    bool              reset_after_max;     // сброс шага в 0 после достижения потолка
    double            max_lot;             // абсолютный кэп лота (0 = без кэпа)
 
+   //--- Автолот от баланса -----------------------------------------
+   //    Базовый лот = (balance / auto_lot_balance_per) * auto_lot_step.
+   //    Схема «0.01 / 100» => auto_lot_step=0.01, auto_lot_balance_per=100:
+   //    0.01 лота на каждые 100 единиц баланса.
+   bool              use_auto_lot;        // считать базовый лот от баланса
+   double            auto_lot_step;       // лот на одну «порцию» баланса
+   double            auto_lot_balance_per;// размер «порции» баланса
+
    //--- Таргеты
    bool              use_atr_targets;     // TP/SL = ATR × множитель
    double            atr_tp_mult;         // множитель ATR для TP
@@ -169,21 +177,36 @@ private:
    double            LotForStep(int step) const
      {
       if(step < 0) step = 0;
-      double lot = m_cfg.base_lot;
+      double base = EffectiveBaseLot();
+      double lot = base;
       switch(m_cfg.mart_scheme)
         {
          case MART_GEOMETRIC:
-            lot = m_cfg.base_lot * MathPow(m_cfg.mart_multiplier, (double)step);
+            lot = base * MathPow(m_cfg.mart_multiplier, (double)step);
             break;
          case MART_LINEAR:
-            lot = m_cfg.base_lot * (1.0 + (double)step * m_cfg.mart_increment);
+            lot = base * (1.0 + (double)step * m_cfg.mart_increment);
             break;
          case MART_HARMONIC:
-            lot = m_cfg.base_lot / (double)(step + 1);
+            lot = base / (double)(step + 1);
             break;
         }
       if(m_cfg.max_lot > 0.0 && lot > m_cfg.max_lot)
          lot = m_cfg.max_lot;
+      return lot;
+     }
+
+   //--- Базовый лот: фиксированный или авто от баланса. -------------
+   //    Авто: (balance / balance_per) * step. Пример «0.01/100»:
+   //    баланс 100 => 0.01, баланс 1000 => 0.10.
+   double            EffectiveBaseLot() const
+     {
+      if(!m_cfg.use_auto_lot)
+         return m_cfg.base_lot;
+      double per = (m_cfg.auto_lot_balance_per > 0.0) ? m_cfg.auto_lot_balance_per : 100.0;
+      double balance = AccountInfoDouble(ACCOUNT_BALANCE);
+      double lot = (balance / per) * m_cfg.auto_lot_step;
+      if(lot <= 0.0) lot = m_cfg.auto_lot_step;
       return lot;
      }
 
@@ -713,6 +736,8 @@ public:
    int               Losses()        const { return m_losses; }
    double            LastRealized()  const { return m_last_realized; }
    string            SchemeString()  const { return SchemeName(m_cfg.mart_scheme); }
+   double            BaseLotNow()    const { return EffectiveBaseLot(); }
+   bool              IsAutoLot()     const { return m_cfg.use_auto_lot; }
 
    //--- В режиме усреднения «шаг» = число ордеров в корзине.
    bool              IsAveraging()   const { return m_cfg.use_averaging; }

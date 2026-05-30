@@ -43,6 +43,12 @@ input int    InpRsiPeriod      = 14;       // период RSI
 input double InpRsiBuyLevel    = 40.0;     // RSI <= уровня в аптренде => BUY
 input double InpRsiSellLevel   = 60.0;     // RSI >= уровня в даунтренде => SELL
 
+input group "=== Сигнал: подтверждение WPR (Williams %R) ==="
+input bool   InpUseWPR         = false;    // включить фильтр WPR (диапазон -100..0)
+input int    InpWprPeriod      = 14;       // период WPR
+input double InpWprBuyLevel    = -80.0;    // WPR <= уровня (перепроданность) подтверждает BUY
+input double InpWprSellLevel   = -20.0;    // WPR >= уровня (перекупленность) подтверждает SELL
+
 input group "=== Таргеты (TP/SL) ==="
 input bool   InpUseATRTargets  = true;     // TP/SL по ATR (иначе фикс. пункты)
 input int    InpAtrPeriod      = 14;       // период ATR
@@ -52,13 +58,18 @@ input int    InpTpPoints        = 150;     // фикс. TP (пункты), ес�
 input int    InpSlPoints        = 280;     // фикс. SL (пункты), если ATR выкл
 
 input group "=== Мартингейл ==="
-input double           InpBaseLot        = 0.01;            // базовый лот (шаг 0)
+input double           InpBaseLot        = 0.01;            // базовый лот (шаг 0), если автолот выкл
 input ENUM_MART_SCHEME InpMartScheme     = MART_GEOMETRIC;  // схема роста лота по шагу
 input double           InpMartMultiplier = 1.5;             // множитель (GEOMETRIC)
 input double           InpMartIncrement  = 0.5;             // приращение k (LINEAR)
 input int              InpMaxMartSteps   = 6;               // потолок шагов мартина
 input bool             InpResetAfterMax  = true;            // сброс шага в 0 после потолка
 input double           InpMaxLot         = 5.0;             // абсолютный кэп лота (0 = без кэпа)
+
+input group "=== Автолот от баланса ==="
+input bool   InpUseAutoLot        = false;  // считать базовый лот от баланса (вместо InpBaseLot)
+input double InpAutoLotStep       = 0.01;   // лот на одну порцию баланса (схема «0.01 / 100»)
+input double InpAutoLotBalancePer = 100.0;  // размер порции баланса (валюта счёта)
 
 input group "=== Трейлинг ==="
 input bool   InpUseTrailing       = false;  // включить трейлинг-стоп
@@ -123,8 +134,25 @@ bool ValidateInputs()
      { Print("Множители ATR должны быть > 0"); return false; }
    if(!InpUseATRTargets && (InpTpPoints <= 0 || InpSlPoints <= 0))
      { Print("Фикс. TP/SL (пункты) должны быть > 0"); return false; }
-   if(InpBaseLot <= 0.0)
-     { Print("InpBaseLot должен быть > 0"); return false; }
+   if(!InpUseAutoLot && InpBaseLot <= 0.0)
+     { Print("InpBaseLot должен быть > 0 (или включите InpUseAutoLot)"); return false; }
+   if(InpUseAutoLot)
+     {
+      if(InpAutoLotStep <= 0.0)
+        { Print("InpAutoLotStep должен быть > 0"); return false; }
+      if(InpAutoLotBalancePer <= 0.0)
+        { Print("InpAutoLotBalancePer должен быть > 0"); return false; }
+     }
+   if(InpUseWPR)
+     {
+      if(InpWprPeriod <= 0)
+        { Print("InpWprPeriod должен быть > 0"); return false; }
+      if(InpWprBuyLevel < -100.0 || InpWprBuyLevel > 0.0 ||
+         InpWprSellLevel < -100.0 || InpWprSellLevel > 0.0)
+        { Print("Уровни WPR должны быть в [-100..0]"); return false; }
+      if(InpWprBuyLevel >= InpWprSellLevel)
+        { Print("InpWprBuyLevel должен быть < InpWprSellLevel (напр. -80 и -20)"); return false; }
+     }
    if(InpMartScheme == MART_GEOMETRIC && InpMartMultiplier <= 1.0)
       Print("ПРЕДУПРЕЖДЕНИЕ: множитель <= 1.0 для GEOMETRIC не наращивает лот");
    if(InpMartScheme == MART_LINEAR && InpMartIncrement < 0.0)
@@ -184,6 +212,10 @@ int OnInit()
    scfg.rsi_sell_level  = InpRsiSellLevel;
    scfg.atr_period      = InpAtrPeriod;
    scfg.signal_shift    = 1;   // последний закрытый бар
+   scfg.use_wpr         = InpUseWPR;
+   scfg.wpr_period      = InpWprPeriod;
+   scfg.wpr_buy_level   = InpWprBuyLevel;
+   scfg.wpr_sell_level  = InpWprSellLevel;
 
    if(!g_signal.Init(_Symbol, InpTimeframe, scfg, GetPointer(g_log)))
      {
@@ -199,6 +231,9 @@ int OnInit()
    cfg.max_mart_steps     = InpMaxMartSteps;
    cfg.reset_after_max    = InpResetAfterMax;
    cfg.max_lot            = InpMaxLot;
+   cfg.use_auto_lot       = InpUseAutoLot;
+   cfg.auto_lot_step      = InpAutoLotStep;
+   cfg.auto_lot_balance_per = InpAutoLotBalancePer;
    cfg.use_atr_targets    = InpUseATRTargets;
    cfg.atr_tp_mult        = InpAtrTpMult;
    cfg.atr_sl_mult        = InpAtrSlMult;
@@ -262,6 +297,14 @@ void UpdateStatusComment()
    string trend_s = (trend > 0) ? "ВВЕРХ" : (trend < 0 ? "ВНИЗ" : "флэт");
    long   spread  = SymbolInfoInteger(_Symbol, SYMBOL_SPREAD);
 
+   string wpr_s = "";
+   if(InpUseWPR)
+      wpr_s = StringFormat("   WPR: %.1f", g_signal.CurrentWPR());
+
+   string lot_mode = g_engine.IsAutoLot()
+                     ? StringFormat("автолот=%.2f", g_engine.BaseLotNow())
+                     : StringFormat("базлот=%.2f", g_engine.BaseLotNow());
+
    int closed = g_engine.TradesClosed();
    double winrate = (closed > 0) ? (100.0 * g_engine.Wins() / closed) : 0.0;
 
@@ -275,26 +318,26 @@ void UpdateStatusComment()
       int    bdir = g_engine.BasketDir();
       string bdir_s = (bdir > 0) ? "BUY" : (bdir < 0 ? "SELL" : "—");
       mode_line = StringFormat(
-         "режим: УСРЕДНЕНИЕ   корзина: %s ордеров=%d   PnL=%.2f\n"
+         "режим: УСРЕДНЕНИЕ (%s)   корзина: %s ордеров=%d   PnL=%.2f\n"
          "след. лот долива=%.2f   схема=%s",
-         bdir_s, g_engine.AvgOrders(), g_engine.BasketPnL(),
+         lot_mode, bdir_s, g_engine.AvgOrders(), g_engine.BasketPnL(),
          g_engine.NextLot(), g_engine.SchemeString());
      }
    else
      {
       mode_line = StringFormat(
-         "режим: последовательный   мартин: шаг=%d   след. лот=%.2f   схема=%s",
-         g_engine.MartStep(), g_engine.NextLot(), g_engine.SchemeString());
+         "режим: последовательный (%s)   мартин: шаг=%d   след. лот=%.2f   схема=%s",
+         lot_mode, g_engine.MartStep(), g_engine.NextLot(), g_engine.SchemeString());
      }
 
    string s = StringFormat(
       "AWScalper v0.1 | %s %s | magic=%I64u\n"
-      "тренд: %s   RSI: %.1f   спред: %d пт\n"
+      "тренд: %s   RSI: %.1f%s   спред: %d пт\n"
       "%s\n"
       "сделок: открыто=%d закрыто=%d   W/L=%d/%d   винрейт=%.1f%%\n"
       "последний результат: %.2f   пик эквити: %.2f%s",
       _Symbol, EnumToString(InpTimeframe), InpMagic,
-      trend_s, rsi, (int)spread,
+      trend_s, rsi, wpr_s, (int)spread,
       mode_line,
       g_engine.TradesOpened(), closed,
       g_engine.Wins(), g_engine.Losses(), winrate,
